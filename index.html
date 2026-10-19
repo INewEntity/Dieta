@@ -152,7 +152,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 10;
+const VERSION = 11;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -788,7 +788,7 @@ function mealCard(M, now){
     }).join('')}</ul>`;
   const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}</div>` : '';
   const actions = st === 'pending'
-    ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
+    ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
   return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
     <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${items}${notes}${actions}</div></div>`;
@@ -847,7 +847,8 @@ function sheetMore(m){
   const k = dayKey(), D = computeDay(k), M = D.meals[m];
   sheet(`<h2>${MEAL_NAME[m]}</h2><div class="sub">Prevista a las ${fmt(M.t)}</div>
   <div class="stack">
-    <button class="opt sel" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
+    <button class="opt sel" data-x="coach"><span>✨ ¿Cómo completo lo que me falta?</span><span class="d">con lo que tienes</span></button>
+    <button class="opt" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
     <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
     <button class="opt" data-x="plan"><span>🗓️ Planificar cambios</span><span class="d">sin marcarla como hecha</span></button>
     <button class="opt" data-x="edit"><span>✏️ Hecha con cambios</span><span class="d">lo que comiste de verdad</span></button>
@@ -860,6 +861,7 @@ function sheetMore(m){
       const x = e.target.closest('[data-x]'); if (!x) return;
       const a = x.dataset.x;
       if (a === 'ai') sheetAI(m);
+      if (a === 'coach') sheetCoach(m);
       if (a === 'at') el.querySelector('#atbox').hidden = false;
       if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
       if (a === 'edit') sheetEdit(m);
@@ -1120,10 +1122,24 @@ function aiSchema(extraIds = []){
     },
   };
 }
-async function aiAnalyze({m, items, text, photo, at}){
+// Llamada común a Claude: salida estructurada con el esquema dado, respaldo ante rechazos y registro del gasto.
+async function aiCall(system, content, schema){
   const Anthropic = await loadSDK();
   const client = new Anthropic({apiKey: aiKey(), dangerouslyAllowBrowser: true});
   const model = AI_MODELS[S.settings.aiModel] ? S.settings.aiModel : 'claude-opus-5-5';
+  const params = {model, max_tokens:8000, system, messages:[{role:'user', content}],
+    output_config:{effort:'low', format:{type:'json_schema', schema}}};
+  let res;
+  if (AI_MODELS[model].fallback) res = await client.beta.messages.create(Object.assign(params, {betas:['server-side-fallback-2026-07-01'], fallbacks:'default'}));
+  else res = await client.messages.create(params);
+  const u = res.usage || {}, p = AI_MODELS[model];
+  S.ai.spent[model] = (S.ai.spent[model] || 0) + ((u.input_tokens || 0) * p.in + (u.output_tokens || 0) * p.out) / 1e6;
+  S.ai.calls[model] = (S.ai.calls[model] || 0) + 1; save();
+  if (res.stop_reason === 'refusal') throw new Error('La IA no ha querido responder a esto. Usa las opciones manuales.');
+  if (res.stop_reason === 'max_tokens') throw new Error('La respuesta de la IA se cortó. Prueba con algo más corto.');
+  return JSON.parse(res.content.filter(b => b.type === 'text').map(b => b.text).join(''));
+}
+async function aiAnalyze({m, items, text, photo, at}){
   // Preselección local: los ~20 productos de Mercadona que más se parecen a lo que cuenta (y los que ya usa)
   let cand = [];
   if (text){ try{ await loadMDB(); cand = candidatesFor(text); }catch(_){} }
@@ -1136,18 +1152,7 @@ async function aiAnalyze({m, items, text, photo, at}){
   const content = [];
   if (photo) content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}});
   content.push({type:'text', text:`Contexto de la app:\n${JSON.stringify(ctx)}\n\nLo que cuenta el usuario:\n${text || '(sin texto: usa la foto)'}`});
-  const params = {model, max_tokens:8000, system:aiSystem(), messages:[{role:'user', content}],
-    output_config:{effort:'low', format:{type:'json_schema', schema:aiSchema(cand)}}};
-  let res;
-  if (AI_MODELS[model].fallback) res = await client.beta.messages.create(Object.assign(params, {betas:['server-side-fallback-2026-07-01'], fallbacks:'default'}));
-  else res = await client.messages.create(params);
-  const u = res.usage || {}, p = AI_MODELS[model];
-  S.ai.spent[model] = (S.ai.spent[model] || 0) + ((u.input_tokens || 0) * p.in + (u.output_tokens || 0) * p.out) / 1e6;
-  S.ai.calls[model] = (S.ai.calls[model] || 0) + 1; save();
-  if (res.stop_reason === 'refusal') throw new Error('La IA no ha querido analizar esto. Usa las opciones manuales.');
-  if (res.stop_reason === 'max_tokens') throw new Error('La respuesta de la IA se cortó. Prueba con una descripción más corta.');
-  const txt = res.content.filter(b => b.type === 'text').map(b => b.text).join('');
-  return JSON.parse(txt);
+  return aiCall(aiSystem(), content, aiSchema(cand));
 }
 function aiErrorText(e){
   const A = _Anthropic;
@@ -1236,6 +1241,134 @@ function sheetAIReview(m, r, at){
       aiDraft = {text:'', photo:null}; closeSheet();
       if (status === 'skipped') return logMeal(m, 'skipped');
       logMeal(m, status, {at, items:items.filter(i => i.g > 0), extra:extras, resumen:r.resumen || ''});
+    });
+  });
+}
+
+/* ===================== IA: «¿Cómo completo lo que me falta?» ===================== */
+// Para una comida pendiente: la IA propone 1–3 versiones completas de esa comida que cuadran el día,
+// usando primero lo que hay en casa y, si hace falta, productos de Mercadona. Cada opción se puede aplicar
+// a la comida (cantidades fijadas, sin marcarla como hecha) y el resto del día se recoloca.
+const enCasa = id => S.pantry[id] !== 'falta' && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
+function coachContext(m){
+  const D = computeDay(dayKey()), M = D.meals[m];
+  const T = {k: +S.settings.kcal || D.target.k, p: +S.settings.prot || D.target.p, c: D.target.c, f: D.target.f};
+  const otras = D.sch.order.filter(x => x !== m && D.meals[x].status === 'pending' && !D.meals[x].merged)
+    .reduce((a, x) => addM(a, sumItems(D.meals[x].items)), ZERO);
+  const cubrir = addM(addM(T, D.consumed, -1), otras, -1);
+  return {D, M, T, otras, cubrir, ahora: sumItems(M.items)};
+}
+const macrosTxt = x => ({kcal: R(x.k), proteina_g: R(x.p), hidratos_g: R(x.c), grasa_g: R(x.f)});
+function foodRow(id, casa){
+  const F = useMDB(id) || FOODS[id], o = {id, nombre: F.n, por_100: {kcal: F.k, p: F.p, c: F.c, f: F.f}};
+  if (F.u) o.unidad_g = F.u; if (F.ml) o.liquido = true; if (F.tal) o.sin_escurrir = true; if (F.s === 'c') o.en_crudo = true;
+  if (casa) o.en_casa = true;
+  return o;
+}
+function coachSystem(){
+  return `Eres el asistente de nutrición de una app de dieta personal. El usuario es un chico de 26 años en volumen lento que entrena fuerza; la proteína es lo prioritario. Para UNA comida concreta propones cómo completarla para que el día llegue a sus objetivos.
+
+Recibes: lo que debería aportar esta comida ("a_cubrir_en_esta_comida", ya descontado lo que ha comido hoy y lo que aportarán las demás comidas pendientes), lo que lleva ahora, su despensa (alimentos con "en_casa") y una preselección de productos de Mercadona, donde compra.
+
+Cómo responder:
+- Propón de 1 a 3 opciones distintas entre sí. Cada opción es la lista COMPLETA de lo que comería en esta comida: puedes mantener, quitar o cambiar los gramos de lo que ya lleva. Usa solo ids de las listas.
+- El total de cada opción debe quedar cerca de "a_cubrir_en_esta_comida": proteína a ±5 g y kcal a ±10 %. Si no se puede (por ejemplo, falta mucha proteína y quedan pocas kcal), prioriza la proteína y dilo en la respuesta. Si lo que falta es negativo, la comida debe ser más ligera.
+- Usa primero lo que tiene en casa. Si propones algo que no tiene, dilo en la explicación ("habría que comprar…").
+- Cantidades realistas para una comida y fáciles de pesar. Arroz y pasta en crudo. Huevos, latas y piezas en gramos, usando unidad_g.
+- Haz caso a lo que pide el usuario: tiempo, cocinar o no, gustos, lo que no le apetece o lo que ya ha comido hoy.
+- respuesta: 1–2 frases. explicacion de cada opción: una frase práctica (cómo prepararla o qué comprar). En español y sin sermones.`;
+}
+function coachSchema(ids){
+  return {type:'object', additionalProperties:false, required:['respuesta', 'opciones'], properties:{
+    respuesta:{type:'string'},
+    opciones:{type:'array', items:{type:'object', additionalProperties:false, required:['titulo', 'items', 'explicacion'], properties:{
+      titulo:{type:'string'}, explicacion:{type:'string'},
+      items:{type:'array', items:{type:'object', additionalProperties:false, required:['id', 'g'], properties:{id:{type:'string', enum:ids}, g:{type:'number'}}}},
+    }}},
+  }};
+}
+async function coachAsk(m, pregunta, previa){
+  const C = coachContext(m);
+  try{ await loadMDB(); }catch(_){}
+  // despensa: alimentos base que hay en casa + otros productos de la despensa
+  const casa = Object.keys(FOODS_BASE).filter(id => enCasa(id)).concat(Object.keys(S.despensa || {}).filter(id => FOODS[id] && enCasa(id)));
+  // Mercadona: lo que se parezca a la pregunta y, según lo que falte, algunos básicos de cada grupo
+  let merc = [];
+  if (MDB){
+    const add = ids => ids.forEach(id => { if (!casa.includes(id) && !merc.includes(id) && useMDB(id) && FOODS[id].q !== 'b') merc.push(id); });
+    if (pregunta) add(candidatesFor(pregunta, 12));
+    if (C.cubrir.p > 10) add(searchFoods('pechuga pavo pollo atun claras merluza yogur proteinas queso batido', {group:'prot', limit:8, base:false}));
+    if (C.cubrir.c > 25) add(searchFoods('arroz pasta patata pan tortitas avena', {group:'carb', limit:5, base:false}));
+    if (C.cubrir.f > 10) add(searchFoods('aceite nueces almendra aguacate', {group:'grasa', limit:3, base:false}));
+    merc = merc.slice(0, 26);
+  }
+  const ctx = {
+    comida: MEAL_NAME[C.M.key], hora_prevista: fmt(C.M.t), hora_actual: fmt(nowMin()),
+    objetivo_del_dia: macrosTxt(C.T), comido_hoy: macrosTxt(C.D.consumed),
+    otras_comidas_pendientes_aportan: macrosTxt(C.otras),
+    a_cubrir_en_esta_comida: macrosTxt(C.cubrir),
+    esta_comida_ahora: C.M.items.filter(x => !x.fromBatido).map(x => ({id:x.id, alimento:FOODS[x.id].n, g:R(x.g)})),
+    despensa_en_casa: casa.map(id => foodRow(id, true)),
+    productos_mercadona: merc.map(id => foodRow(id, false)),
+  };
+  if (previa) ctx.conversacion_previa = previa;
+  const ids = [...new Set(casa.concat(merc, C.M.items.map(x => x.id)))];
+  const content = [{type:'text', text:`Contexto de la app:\n${JSON.stringify(ctx)}\n\nPregunta del usuario:\n${pregunta || '¿Cómo completo esta comida para llegar a mis objetivos?'}`}];
+  const r = await aiCall(coachSystem(), content, coachSchema(ids));
+  r.opciones = (r.opciones || []).slice(0, 3).map(o => ({...o, items:(o.items || []).filter(it => FOODS[it.id] && it.g > 0).map(it => ({id:it.id, g:Math.round(it.g)}))})).filter(o => o.items.length);
+  return {r, C};
+}
+let coachDraft = {m:null, q:'', last:null};
+function sheetCoach(m){
+  if (!aiKey()){ closeSheet(); TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
+  if (coachDraft.m !== m) coachDraft = {m, q:'', last:null};
+  const C = coachContext(m);
+  const chips = ['Con lo que tengo en casa', 'Algo rápido, sin cocinar', 'Sin repetir lo que ya he comido hoy', 'Que no lleve huevo'];
+  sheet(`<h2>✨ Completar ${MEAL_NAME[m].toLowerCase()}</h2>
+    <div class="sub">Para cuadrar el día, esta comida debería aportar <b class="num">~${R(Math.max(0, C.cubrir.k))} kcal y ${R(Math.max(0, C.cubrir.p))} g de proteína</b>. Ahora lleva ${R(C.ahora.k)} kcal y ${R(C.ahora.p)} g.</div>
+    <div class="chips" style="margin-bottom:8px">${chips.map(c => `<button class="chip" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    <textarea id="cq" rows="3" placeholder="Pregunta lo que quieras: «me faltan 40 g de proteína y no me apetece salmón», «algo para llevar al trabajo»…">${esc(coachDraft.q)}</textarea>
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cerrar</button><button class="btn pri" data-x="go">Preguntar</button></div>
+    <ul id="cerr" class="tips" style="margin-top:10px"></ul>
+    <div id="cres"></div>
+    <div class="muted" style="font-size:12px;margin-top:8px">${AI_MODELS[S.settings.aiModel].n} · ${aiCostHint(S.settings.aiModel)} por consulta · 🏠 = lo tienes en casa</div>`, el => {
+    const draw = () => {
+      const L = coachDraft.last; if (!L) return;
+      el.querySelector('#cres').innerHTML = `<ul class="tips"><li>${esc(L.r.respuesta || '')}</li></ul>` + L.r.opciones.map((o, i) => {
+        const t = sumItems(o.items), cu = L.C.cubrir;
+        return `<div class="card" style="margin-bottom:10px"><div class="evname" style="margin-bottom:4px">${esc(o.titulo)}</div>
+          <ul class="items">${o.items.map(it => `<li><span>${enCasa(it.id) ? '🏠' : '🛒'} ${esc(FOODS[it.id].n)}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`).join('')}</ul>
+          <div class="macroline num">Total: ${R(t.k)} kcal · ${R(t.p)} g P · ${R(t.c)} g H · ${R(t.f)} g G <span class="muted">(objetivo de la comida: ${R(cu.k)} kcal · ${R(cu.p)} g P)</span></div>
+          ${o.explicacion ? `<div class="evnote">${esc(o.explicacion)}</div>` : ''}
+          ${(() => { // aviso si la opción no cuadra con lo que debería aportar la comida
+            const dk = t.k - cu.k, dp = t.p - cu.p, av = [];
+            if (Math.abs(dk) > Math.max(80, Math.abs(cu.k) * 0.15)) av.push(`${dk > 0 ? '+' : ''}${R(dk)} kcal`);
+            if (dp < -6) av.push(`${R(dp)} g de proteína`);
+            return av.length ? `<ul class="tips" style="margin:8px 0 0"><li class="amber">No cuadra del todo: ${av.join(' y ')} respecto a lo que debería aportar.${dk > 0 ? '' : ' El resto del día ya no puede compensarlo si es la última comida.'}</li></ul>` : '';
+          })()}
+          <div class="evactions"><button class="btn pri" data-apply="${i}">Aplicar a esta comida</button></div></div>`; }).join('');
+    };
+    draw();
+    el.addEventListener('click', async e => {
+      const q = e.target.closest('[data-q]'); if (q){ el.querySelector('#cq').value = q.dataset.q; return; }
+      const ap = e.target.closest('[data-apply]');
+      if (ap){
+        const o = coachDraft.last.r.opciones[+ap.dataset.apply], day = getDay(dayKey());
+        day.planEdit = day.planEdit || {}; day.planEdit[m] = o.items.map(it => ({id:it.id, g:it.g}));
+        o.items.forEach(it => { if (FOODS[it.id].mid) keepFood(it.id); });
+        save(); closeSheet(); render(); toast(`${MEAL_NAME[m]}: «${o.titulo}» aplicada. El resto del día se ha recolocado.`); return;
+      }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'cancel') return closeSheet();
+      const pregunta = el.querySelector('#cq').value.trim(); coachDraft.q = pregunta;
+      x.disabled = true; x.textContent = 'Pensando…'; el.querySelector('#cerr').innerHTML = '';
+      try{
+        const previa = coachDraft.last ? {pregunta: coachDraft.last.q, opciones_propuestas: coachDraft.last.r.opciones.map(o => o.titulo)} : null;
+        const {r, C: C2} = await coachAsk(m, pregunta, previa);
+        if (!r.opciones.length) throw new Error(r.respuesta || 'La IA no ha propuesto nada aplicable. Prueba a preguntarlo de otra forma.');
+        coachDraft.last = {r, C: C2, q: pregunta}; draw();
+      }catch(err){ el.querySelector('#cerr').innerHTML = `<li class="coral">${esc(aiErrorText(err))}</li>`; }
+      x.disabled = false; x.textContent = 'Preguntar otra vez';
     });
   });
 }
@@ -1582,6 +1715,7 @@ app.addEventListener('click', async e => {
   else if (a === 'undo'){ const day = getDay(dayKey()); const prev = day.meals[m]; delete day.meals[m]; if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
   else if (a === 'swap') sheetSwap(m, +b.dataset.i);
   else if (a === 'qty') changeQty(m, +b.dataset.i, +b.dataset.d);
+  else if (a === 'coach') sheetCoach(m);
   else if (a === 'planreset'){ const day = getDay(dayKey()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
