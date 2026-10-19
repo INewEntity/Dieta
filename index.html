@@ -152,7 +152,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 9;
+const VERSION = 10;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -527,6 +527,8 @@ function computeDay(k){
     meals.cena.items = meals.cena.items.concat(meals.merienda.items.map(x => Object.assign({}, x, {fromBatido:true})));
     meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
   }
+  // objetivos del día: los de Ajustes (la suma del plan puede desviarse algo con intercambios y redondeos)
+  const TK = +S.settings.kcal || target.k, TP = +S.settings.prot || target.p;
   const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged && !meals[m].locked);
   const locked = sch.order.filter(m => meals[m].locked);
   const tips = [];
@@ -569,7 +571,7 @@ function computeDay(k){
     let prot = false;
     if (conProteina && cut > 30){
       const pendP = ms.reduce((a, M) => a + sumItems(M.items).p, 0) + locked.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
-      const spareP = consumed.p + pendP - target.p;
+      const spareP = consumed.p + pendP - TP;
       const protIt = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido));
       const pk = protIt.reduce((a,it) => a + mac(it.id,it.g).k, 0), pp = protIt.reduce((a,it) => a + mac(it.id,it.g).p, 0);
       if (spareP > 8 && pp > 0){ const g = scaleGroup(ms, 'prot', -Math.min(cut, spareP * pk / pp), 0.5); got = addM(got, g); cut += g.k; prot = g.k < 0; if (prot) hecho.push('la proteína que te sobraba'); }
@@ -585,11 +587,12 @@ function computeDay(k){
     added = addM(added, got);
     meals.cena.notes.push(`<b>Cena tardía</b>: misma proteína y un 40 % menos de hidratos para dormir mejor.`);
   }
-  // repaso final: recortar hidratos o grasa también quita algo de proteína (patata, pan, avena…).
-  // Si el día ya no llega al objetivo de proteína, se completa en lo que queda.
+  // Repaso final, anclado al objetivo de Ajustes (no a la suma del plan, que se desvía con los intercambios):
+  // 1) proteína hasta el objetivo; 2) kcal hasta el objetivo, recortando o añadiendo en lo que queda.
   const pendLeft = pending.filter(m => meals[m].status === 'pending');
   if (pendLeft.length){
-    let gap = target.p - consumed.p - pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items).p, 0);
+    const sumRest = key => pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items)[key], 0);
+    let gap = TP - consumed.p - sumRest('p');
     if (gap > 2){
       pendLeft.slice().reverse().forEach((m, i) => { // de la última comida hacia atrás
         if (gap <= 2) return;
@@ -597,9 +600,18 @@ function computeDay(k){
         gap -= got.p;
       });
     }
-    // lo que acaba de añadir la proteína no puede dejar el día por encima de las kcal: se compensa sin tocar la proteína
-    const over = consumed.k + pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items).k, 0) - target.k;
-    if (!minimo && over > 60) trimSurplus(pendLeft.map(m => meals[m]), over, false);
+    if (!minimo){
+      const over = consumed.k + sumRest('k') - TK;
+      if (over > 40){
+        const r = trimSurplus(pendLeft.map(m => meals[m]), over, true);
+        if (!tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
+      } else if (over < -60){
+        // falta energía: más hidratos en lo que queda (no en una cena tardía, que va ligera a propósito)
+        const ms = pendLeft.filter(m => !(m === 'cena' && meals.cena.t >= late)).map(m => meals[m]);
+        const got = scaleGroup(ms, 'carb', -over, 0.8);
+        if (got.k > 60 && !tips.some(t => /calorías que faltaban/.test(t.html))) tips.push({cls:'', html:`He recuperado las <b>calorías que faltaban</b> con algo más de hidratos en lo que queda.`});
+      }
+    }
   }
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
