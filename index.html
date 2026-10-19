@@ -148,7 +148,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 4;
+const VERSION = 5;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -186,6 +186,7 @@ const FOODS = {
   aguacate:{n:'Aguacate',g:'grasa',k:160,p:2,c:2,f:15,sec:'Fruta y verdura'},
   nueces:{n:'Nueces',g:'grasa',k:680,p:15,c:4,f:65,sec:'Panadería y despensa'},
 };
+const FOODS_BASE = JSON.parse(JSON.stringify(FOODS)); // valores genéricos, para poder desvincular
 const GROUP_KEY = {prot:'p',carb:'c',grasa:'f',fruta:'c',verd:null,liq:null};
 const ALTS = {
   prot:['pollo','pavo','atun','merluza','ternera','salmon','sardinas','claras','huevo','quesob','yogurp','whey'],
@@ -245,6 +246,26 @@ function load(){
   S = Object.assign(structuredClone(DEFAULTS), S);
   S.settings = Object.assign(structuredClone(DEFAULTS.settings), S.settings);
   Object.assign(FOODS, S.foods || {}); // productos de Mercadona que ya has usado
+  applyLinks();
+}
+// Cada alimento base de la despensa puede ir vinculado a su producto de Mercadona (S.link): entonces el plan
+// usa los macros de su etiqueta, salvo que no sean comparables (otro estado, conserva sin escurrir, mezcla…).
+const LINK_SOLO_NOMBRE = new Set(['ensalada', 'agua', 'whey']);
+const ESTADO_BASE = {arroz:'c', pasta:'c', avena:'c'};
+function linkUsaMacros(base, mid){
+  const B = FOODS_BASE[base], F = FOODS[mid];
+  if (!B || !F || LINK_SOLO_NOMBRE.has(base) || F.tal || F.q === 'b') return false;
+  if (ESTADO_BASE[base] && F.s && F.s !== ESTADO_BASE[base]) return false;
+  return Math.abs(F.k - B.k) / Math.max(B.k, 1) <= 0.4; // red de seguridad ante vínculos raros
+}
+function applyLinks(){
+  for (const base of Object.keys(FOODS_BASE)){
+    const B = FOODS_BASE[base], F = FOODS[base], mid = (S.link || {})[base];
+    Object.assign(F, {k:B.k, p:B.p, c:B.c, f:B.f}); delete F.brand; delete F.brandMacros;
+    if (!mid || !FOODS[mid]) continue;
+    F.brand = FOODS[mid].n;
+    if (linkUsaMacros(base, mid)){ const M = FOODS[mid]; Object.assign(F, {k:M.k, p:M.p, c:M.c, f:M.f}); F.brandMacros = true; }
+  }
 }
 function save(){ try{ localStorage.setItem(STORE, JSON.stringify(S)); }catch(e){} }
 load();
@@ -289,7 +310,25 @@ function mdbFood(r){ // fila compacta de alimentos.json -> forma de FOODS
   if (r.l) F.ml = 1;
   if (r.e) F.ean = r.e;
   if (r.x) F.tal = 1; // conserva en aceite: valores sin escurrir
+  if (r.s) F.s = r.s;
   return F;
+}
+function persistFood(id){ const F = FOODS[id]; if (F && F.mid){ S.foods = S.foods || {}; S.foods[id] = F; } }
+// La primera vez que se carga la base, cada alimento base se vincula con su producto de Mercadona más fiable.
+function autoLink(){
+  if (!MDB || !MDB.map) return;
+  S.link = S.link || {};
+  let changed = false;
+  for (const [base, ids] of Object.entries(MDB.map)){
+    if (base in S.link || !FOODS_BASE[base]) continue;
+    // el más típico (orden de la base) que se parezca en kcal al del plan (±20 %); si ninguno, el más parecido.
+    // Así el salmón fresco no acaba vinculado al salmón en lata.
+    const B = FOODS_BASE[base], dif = id => Math.abs(FOODS[id].k - B.k) / Math.max(B.k, 1);
+    const fiables = ids.filter(id => useMDB(id) && FOODS[id].q !== 'b');
+    const id = fiables.find(i => dif(i) <= 0.2) || fiables.slice().sort((a, b) => dif(a) - dif(b))[0] || ids.find(i => useMDB(i)); if (!id) continue;
+    S.link[base] = id; persistFood(id); changed = true;
+  }
+  if (changed){ applyLinks(); save(); }
 }
 async function loadMDB(){
   if (MDB) return MDB;
@@ -298,7 +337,9 @@ async function loadMDB(){
       const list = d.a.map(r => ({id:r.i, r, t:' ' + norm(r.n + ' ' + r.c).replace(/[^a-z0-9ñ]+/g, ' ')}));
       const byEan = {}, byId = {};
       list.forEach(x => { byId[x.id] = x; if (x.r.e) byEan[x.r.e] = x; });
-      return (MDB = {fecha:d.fecha, list, byEan, byId, n:list.length});
+      MDB = {fecha:d.fecha, list, byEan, byId, n:list.length, map:d.map || {}};
+      autoLink();
+      return MDB;
     })
     .catch(e => { mdbLoading = null; throw e; });
   return mdbLoading;
@@ -314,7 +355,8 @@ function keepFood(id){ // un producto que se usa: se guarda y sube en «reciente
 function searchFoods(q, {group = null, limit = 20, base = true, mercadona = true} = {}){
   const words = norm(q || '').split(/[^a-z0-9ñ]+/).filter(w => w.length > 1 && !STOP.has(w)).map(w => w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w);
   const rec = S.recent || {}, qual = {a:2, m:1, b:0}, out = [];
-  const score = t => words.reduce((s, w) => s + (t.includes(' ' + w) ? 1 : 0), 0);
+  // +1 por palabra encontrada; +0,3 si el nombre empieza por la primera palabra («sepia limpia» antes que «tinta de sepia»)
+  const score = t => { const s = words.reduce((a, w) => a + (t.includes(' ' + w) ? 1 : 0), 0); return s && t.startsWith(' ' + words[0]) ? s + 0.3 : s; };
   if (base) for (const [id, F] of Object.entries(FOODS)){
     if (F.mid || !(F.sec || id === 'agua') || (group && F.g !== group)) continue;
     const s = words.length ? score(' ' + norm(F.n).replace(/[^a-z0-9ñ]+/g, ' ')) : 0;
@@ -423,7 +465,11 @@ function basePlan(k, sch, opts = {}){
       const to = sw[i] && sw[i].id;
       if (to && to !== it.id) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
       if (S.pantry[it.id] === 'falta'){
-        const alt = ALTS[FOODS[it.id].g].find(a => a !== it.id && S.pantry[a] !== 'falta' && (FOODS[a].sec || a === 'agua'));
+        // primero algo del mismo grupo que tengas en casa (despensa), luego los alimentos base
+        const g = FOODS[it.id].g, key = GROUP_KEY[g] || 'k';
+        const enCasa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === g && S.pantry[id] !== 'falta' && FOODS[id][key] > 0)
+          .sort((a, b) => S.despensa[b] - S.despensa[a]);
+        const alt = enCasa[0] || (ALTS[g] || []).find(a => a !== it.id && S.pantry[a] !== 'falta' && (FOODS[a].sec || a === 'agua'));
         if (alt) return {id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'};
         return Object.assign({}, it, {missing:true});
       }
@@ -740,7 +786,7 @@ function sheetMore(m){
 // Lista de resultados del buscador (alimentos del plan + Mercadona). onPick(id) al tocar uno.
 function foodResults(el, sel, ids, extraHtml = () => ''){
   el.querySelector(sel).innerHTML = ids.length ? ids.map(id => { const F = useMDB(id) || FOODS[id];
-    return `<button class="opt" data-pick="${id}"><span>${esc(F.n)}${F.q === 'b' ? ' <span class="muted" style="font-size:12px">(dato aproximado)</span>' : ''}${F.tal ? ' <span class="muted" style="font-size:12px">(sin escurrir)</span>' : ''}</span><span class="d num">${extraHtml(id, F) || `${R(F.k)} kcal · ${R(F.p)} g P`}</span></button>`; }).join('')
+    return `<button class="opt" data-pick="${id}"><span>${(S.despensa || {})[id] ? '🏠 ' : ''}${esc(F.n)}${F.q === 'b' ? ' <span class="muted" style="font-size:12px">(dato aproximado)</span>' : ''}${F.tal ? ' <span class="muted" style="font-size:12px">(sin escurrir)</span>' : ''}</span><span class="d num">${extraHtml(id, F) || `${R(F.k)} kcal · ${R(F.p)} g P`}</span></button>`; }).join('')
     : `<div class="empty">Sin resultados</div>`;
 }
 function sheetEdit(m, init = null){
@@ -863,7 +909,10 @@ function sheetSwap(m, i){
     const drawMdb = () => {
       // sin búsqueda: primero lo que se parece al alimento original (variantes reales del mismo producto)
       const q = el.querySelector('#swq').value.trim() || FOODS[orig].n;
-      const ids = searchFoods(q, {group:grp, limit:20, base:false}).filter(id => { const F = useMDB(id); return F && F.q !== 'b' && F[GROUP_KEY[grp] || 'k'] > 0; });
+      // lo que tienes en casa del mismo grupo va primero (🏠)
+      const enCasa = el.querySelector('#swq').value.trim() ? [] : Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === grp && S.pantry[id] !== 'falta');
+      const ids = enCasa.concat(searchFoods(q, {group:grp, limit:20, base:false})).filter((v, j, a) => a.indexOf(v) === j)
+        .filter(id => { const F = useMDB(id) || FOODS[id]; return F && F.q !== 'b' && F[GROUP_KEY[grp] || 'k'] > 0; });
       foodResults(el, '#swres', ids, id => amount(id, equiv(orig, origG, id)));
     };
     loadMDB().then(drawMdb).catch(() => { el.querySelector('#swres').innerHTML = '<div class="empty">Sin conexión: la base de Mercadona se descarga la primera vez que la usas.</div>'; });
@@ -1123,24 +1172,71 @@ function weeklyNeeds(){
   add(BATIDO, S.settings.trainDays.length);
   return need;
 }
+let despQuery = '';
 function renderCompra(){
   const need = weeklyNeeds();
-  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec && (need[id] || S.pantry[id] === 'falta'));
-  const falta = ids.filter(id => S.pantry[id] === 'falta');
-  const bySec = {}; ids.forEach(id => (bySec[FOODS[id].sec] = bySec[FOODS[id].sec] || []).push(id));
-  const q = id => need[id] ? `${amount(id, need[id])} / semana` : 'fuera del plan';
-  let h = `<header class="top"><div><h1>Despensa</h1><div class="sub">Marca lo que se acaba; la app lo cambia por un equivalente.</div></div></header>`;
+  const baseIds = Object.keys(FOODS_BASE).filter(id => FOODS[id].sec && (need[id] || S.pantry[id] === 'falta'));
+  const extra = Object.keys(S.despensa || {}).filter(id => FOODS[id]).sort((a, b) => FOODS[a].n.localeCompare(FOODS[b].n));
+  const falta = baseIds.concat(extra).filter(id => S.pantry[id] === 'falta');
+  const bySec = {}; baseIds.forEach(id => (bySec[FOODS[id].sec] = bySec[FOODS[id].sec] || []).push(id));
+  const q = id => need[id] ? `${amount(id, need[id])} / semana` : (FOODS[id].mid ? GROUP_NAME[FOODS[id].g] || '' : 'fuera del plan');
+  const brand = id => FOODS[id].brand ? `<div class="q">🛒 ${esc(FOODS[id].brand)}</div>` : '';
+  const tog = id => { const f = S.pantry[id] === 'falta'; return `<button class="tog ${f?'falta':''}" data-act="pantry" data-id="${id}">${f?'Se acabó':'Hay'}</button>`; };
+  let h = `<header class="top"><div><h1>Despensa</h1><div class="sub">Lo que tienes en casa. Si algo se acaba, la app lo cambia por un equivalente, empezando por lo que tengas.</div></div></header>`;
+  h += `<div class="card"><label class="f" style="margin-top:0">➕ Añadir a la despensa</label>
+    <input id="dq" type="search" placeholder="Busca en Mercadona: tortitas de arroz, sepia, kéfir…" autocomplete="off" value="${esc(despQuery)}">
+    <div id="dres" class="stack" style="margin-top:8px"></div></div>`;
   h += `<h3 class="sec">Lista de la compra (${falta.length})</h3><div class="card list" style="padding:4px 0">`;
-  h += falta.length ? falta.map(id => `<div class="li"><button class="check ${S.shop[id]?'on':''}" data-act="bought" data-id="${id}" aria-label="Comprado">${S.shop[id]?'✓':''}</button><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div></div></div>`).join('')
+  h += falta.length ? falta.map(id => `<div class="li"><button class="check ${S.shop[id]?'on':''}" data-act="bought" data-id="${id}" aria-label="Comprado">${S.shop[id]?'✓':''}</button><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div>${brand(id)}</div></div>`).join('')
     : `<div class="empty">No falta nada. Cuando algo se acabe, márcalo abajo.</div>`;
   h += `</div>`;
   if (falta.length) h += `<div class="evactions" style="margin-bottom:6px"><button class="btn" data-act="copylist">Copiar lista</button><button class="btn pri" data-act="restock">Guardar lo comprado</button></div>`;
   for (const sec of Object.keys(bySec).sort()){
-    h += `<h3 class="sec">${esc(sec)}</h3><div class="card list" style="padding:4px 0">` + bySec[sec].map(id => {
-      const f = S.pantry[id] === 'falta';
-      return `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div></div><button class="tog ${f?'falta':''}" data-act="pantry" data-id="${id}">${f?'Se acabó':'Hay'}</button></div>`; }).join('') + `</div>`;
+    h += `<h3 class="sec">${esc(sec)}</h3><div class="card list" style="padding:4px 0">` + bySec[sec].map(id =>
+      `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div>
+        <button class="q" data-act="link" data-id="${id}" style="padding:2px 0;color:var(--lime-ink);text-align:left">🛒 ${FOODS[id].brand ? esc(FOODS[id].brand) : (S.link && id in S.link ? 'Sin vincular' : 'Vincular con Mercadona')} ›</button></div>${tog(id)}</div>`).join('') + `</div>`;
   }
+  h += `<h3 class="sec">Otros productos en casa (${extra.length})</h3><div class="card list" style="padding:4px 0">`;
+  h += extra.length ? extra.map(id => `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)} · ${R(FOODS[id].k)} kcal · ${R(FOODS[id].p)} g P</div></div>${tog(id)}<button class="btn sm ghost" data-act="desp-del" data-id="${id}" aria-label="Quitar de la despensa">✕</button></div>`).join('')
+    : `<div class="empty">Añade arriba lo que sueles tener: la app lo usará como primera opción en los intercambios.</div>`;
+  h += `</div>`;
   app.innerHTML = h;
+  const drawRes = () => {
+    const res = app.querySelector('#dres'); if (!res) return;
+    if (!despQuery.trim()){ res.innerHTML = ''; return; }
+    if (!MDB){ res.innerHTML = '<div class="empty">Cargando la base de Mercadona…</div>'; return; }
+    const ids = searchFoods(despQuery, {limit:10, base:false});
+    res.innerHTML = ids.length ? ids.map(id => { const F = useMDB(id), dentro = !!(S.despensa || {})[id];
+      return `<button class="opt" data-act="desp-add" data-id="${id}" ${dentro ? 'disabled' : ''}><span>${esc(F.n)}<span class="d" style="display:block">${GROUP_NAME[F.g] || ''} · ${R(F.k)} kcal · ${R(F.p)} g P</span></span><span class="d">${dentro ? 'En casa ✓' : '➕'}</span></button>`; }).join('')
+      : '<div class="empty">Sin resultados</div>';
+  };
+  app.querySelector('#dq').addEventListener('input', e => { despQuery = e.target.value; drawRes(); });
+  drawRes();
+  if (!MDB) loadMDB().then(() => { if (TAB === 'compra') renderCompra(); }).catch(() => {});
+}
+function sheetLink(base){
+  const B = FOODS[base], grp = B.g;
+  sheet(`<h2>Vincular ${esc(B.n.toLowerCase())}</h2><div class="sub">El producto de Mercadona que compras para esto. Si es comparable, el plan usará los macros de su etiqueta.</div>
+    <div id="lkres" class="stack"><div class="empty">Cargando…</div></div>
+    <label class="f">Buscar otro</label><input id="lkq" type="search" placeholder="Busca en Mercadona…" autocomplete="off">
+    <div class="evactions"><button class="btn ghost" data-x="none">Sin vincular (valores genéricos)</button></div>`, el => {
+    const draw = () => {
+      const q = el.querySelector('#lkq').value.trim();
+      const ids = q ? searchFoods(q, {group:grp, limit:15, base:false}) : (MDB.map[base] || []).concat(searchFoods(B.n, {group:grp, limit:8, base:false})).filter((v, i, a) => a.indexOf(v) === i);
+      el.querySelector('#lkres').innerHTML = ids.map(id => { const F = useMDB(id), sel = (S.link || {})[base] === id, usa = linkUsaMacros(base, id);
+        return `<button class="opt ${sel?'sel':''}" data-pick="${id}"><span>${esc(F.n)}<span class="d" style="display:block">${R(F.k)} kcal · ${R(F.p)} g P · ${R(F.c)} g H · ${R(F.f)} g G${usa ? '' : ' · solo el nombre'}</span></span><span class="d">${sel ? '✓' : ''}</span></button>`; }).join('') || '<div class="empty">Sin resultados</div>';
+    };
+    loadMDB().then(draw).catch(() => { el.querySelector('#lkres').innerHTML = '<div class="empty">Sin conexión: la base se descarga la primera vez.</div>'; });
+    el.querySelector('#lkq').addEventListener('input', () => { if (MDB) draw(); });
+    el.addEventListener('click', e => {
+      const p = e.target.closest('[data-pick]'), x = e.target.closest('[data-x]');
+      if (!p && !x) return;
+      S.link = S.link || {};
+      if (p){ S.link[base] = p.dataset.pick; persistFood(p.dataset.pick); } else S.link[base] = null;
+      applyLinks(); save(); closeSheet(); render();
+      toast(p ? (B.brandMacros ? 'Vinculado: el plan usa sus macros' : 'Vinculado (solo el nombre)') : 'Sin vincular: valores genéricos');
+    });
+  });
 }
 
 /* ===================== Progreso ===================== */
@@ -1391,7 +1487,10 @@ app.addEventListener('click', async e => {
   else if (a === 'pantry'){ const id = b.dataset.id; if (S.pantry[id] === 'falta'){ delete S.pantry[id]; delete S.shop[id]; } else S.pantry[id] = 'falta'; save(); render(); }
   else if (a === 'bought'){ const id = b.dataset.id; S.shop[id] = !S.shop[id]; save(); render(); }
   else if (a === 'restock'){ Object.keys(S.shop).forEach(id => { if (S.shop[id]){ delete S.pantry[id]; delete S.shop[id]; } }); save(); render(); toast('Despensa actualizada'); }
-  else if (a === 'copylist'){ const need = weeklyNeeds(); const txt = 'Lista de la compra\n' + Object.keys(S.pantry).filter(id=>S.pantry[id]==='falta').map(id => '- ' + FOODS[id].n + (need[id] ? ' (' + amount(id, need[id]) + ')' : '')).join('\n'); try{ await navigator.clipboard.writeText(txt); toast('Lista copiada'); }catch(_){ toast('No se pudo copiar'); } }
+  else if (a === 'copylist'){ const need = weeklyNeeds(); const txt = 'Lista de la compra (Mercadona)\n' + Object.keys(S.pantry).filter(id=>S.pantry[id]==='falta' && FOODS[id]).map(id => '- ' + (FOODS[id].brand || FOODS[id].n) + (need[id] ? ' (' + amount(id, need[id]) + ')' : '')).join('\n'); try{ await navigator.clipboard.writeText(txt); toast('Lista copiada'); }catch(_){ toast('No se pudo copiar'); } }
+  else if (a === 'link') sheetLink(b.dataset.id);
+  else if (a === 'desp-add'){ const id = b.dataset.id; useMDB(id); persistFood(id); S.despensa = S.despensa || {}; S.despensa[id] = Date.now(); delete S.pantry[id]; save(); render(); toast(FOODS[id].n + ' en la despensa'); }
+  else if (a === 'desp-del'){ const id = b.dataset.id; delete (S.despensa || {})[id]; delete S.pantry[id]; delete S.shop[id]; save(); render(); }
   else if (a === 'saveweight'){ const v = parseFloat(String(document.getElementById('wt').value).replace(',','.')); if (v > 30 && v < 250){ S.weights[dayKey()] = Math.round(v*10)/10; save(); render(); toast('Peso guardado'); } else toast('Peso no válido'); }
   else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } }
   else if (a === 'tday'){ const d = +b.dataset.d, s = S.settings; s.trainDays = s.trainDays.includes(d) ? s.trainDays.filter(x=>x!==d) : s.trainDays.concat(d); save(); render(); }
