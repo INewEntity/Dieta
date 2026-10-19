@@ -79,6 +79,10 @@ header.top .sub{color:var(--muted);font-size:14px}
 .items li.minus .amt{color:var(--amber)}
 .items li.miss button{color:var(--coral)}
 .items s{opacity:.55}
+.items .qty{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.items .stp{flex:0 0 auto;width:30px;height:30px;border-radius:9px;background:var(--card2);border:1px solid var(--line);font-size:18px;font-weight:800;line-height:1;display:grid;place-items:center;color:var(--text);padding:0}
+.items .stp:active{background:var(--lime);color:var(--on-lime)}
+.stp-reset{color:var(--lime-ink);font-weight:700;font-size:13px;padding:0;margin-left:4px;text-decoration:underline}
 .evnote{font-size:13px;color:var(--muted);margin-top:8px}
 .evnote b{color:var(--text)}
 .evactions{display:flex;gap:8px;margin-top:12px}
@@ -148,7 +152,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 6;
+const VERSION = 7;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -499,6 +503,12 @@ function computeDay(k){
     if (t.status !== 'pending'){
       const c = consumedOf(log); consumed = addM(consumed, c); bal = addM(bal, addM(c, planned, -1));
       meals[m].items = (log.items || []).map(x=>Object.assign({}, x));
+    } else if (day.planEdit && day.planEdit[m] && !t.merged){
+      // cantidades fijadas a mano en una comida que aún no has hecho: se respetan tal cual
+      // y la diferencia con el plan la absorben las demás comidas pendientes
+      const own = day.planEdit[m].filter(x => FOODS[x.id] && x.g > 0).map(x => ({id:x.id, g:x.g}));
+      meals[m].items = own; meals[m].locked = true;
+      bal = addM(bal, addM(sumItems(own), planned, -1));
     }
   }
   // el batido que no cabe va con la cena
@@ -506,7 +516,8 @@ function computeDay(k){
     meals.cena.items = meals.cena.items.concat(meals.merienda.items.map(x => Object.assign({}, x, {fromBatido:true})));
     meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
   }
-  const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged);
+  const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged && !meals[m].locked);
+  const locked = sch.order.filter(m => meals[m].locked);
   const tips = [];
   let added = ZERO;
 
@@ -553,7 +564,7 @@ function computeDay(k){
   }
   // 3) Cena tardía
   const late = toMin(S.settings.lateDinner);
-  if (meals.cena.status === 'pending' && meals.cena.t >= late && !minimo){
+  if (meals.cena.status === 'pending' && !meals.cena.locked && meals.cena.t >= late && !minimo){
     const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb').reduce((a,x)=>a+mac(x.id,x.g).k,0);
     const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
     added = addM(added, got);
@@ -563,7 +574,7 @@ function computeDay(k){
   // Si el día ya no llega al objetivo de proteína, se completa en lo que queda.
   const pendLeft = pending.filter(m => meals[m].status === 'pending');
   if (pendLeft.length){
-    let gap = target.p - consumed.p - pendLeft.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
+    let gap = target.p - consumed.p - pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items).p, 0);
     if (gap > 2){
       pendLeft.slice().reverse().forEach((m, i) => { // de la última comida hacia atrás
         if (gap <= 2) return;
@@ -576,7 +587,8 @@ function computeDay(k){
   for (const m of pending) markDeltas(meals[m]);
 
   if (minimo) tips.unshift({cls:'amber', html:'<b>Día mínimo</b>: el único objetivo de hoy es llegar a la proteína. Lo demás, lo que puedas.'});
-  const remainingPlan = pending.reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
+  const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
+  locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
   return {k, sch, meals, target, consumed, remainingPlan, tips, minimo, bal};
 }
 function computeSchedule(k){ return schedule(k); }
@@ -737,11 +749,13 @@ function mealCard(M, now){
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
       const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>' : '';
       const name = esc(FOODS[it.id].n) + sub;
-      return st === 'pending' && !it.added && !it.fromBatido
-        ? `<li class="${cls}"><button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button><span class="amt num">${amt}</span></li>`
+      // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
+      const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(FOODS[it.id].n)}">${d < 0 ? '−' : '+'}</button>`;
+      return st === 'pending' && !it.fromBatido
+        ? `<li class="${cls}">${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<span class="amt num">${amt}</span>${stp(1)}</span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
     }).join('')}</ul>`;
-  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}</div>` : '';
+  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}</div>` : '';
   const actions = st === 'pending'
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
@@ -750,6 +764,21 @@ function mealCard(M, now){
 }
 
 /* ===================== Acciones de comidas ===================== */
+// Cantidades fijadas a mano en una comida pendiente (day.planEdit[m]). La primera vez se copia lo que se ve.
+function planItems(m){
+  const day = getDay(dayKey());
+  day.planEdit = day.planEdit || {};
+  if (!day.planEdit[m]) day.planEdit[m] = computeDay(dayKey()).meals[m].items.filter(x => !x.fromBatido).map(x => ({id:x.id, g:x.g}));
+  return day.planEdit[m];
+}
+function qtyStep(id, g){ const F = FOODS[id]; return F.u ? F.u : g < 60 ? 5 : g < 200 ? 10 : 25; }
+function changeQty(m, i, dir){
+  const items = planItems(m), it = items[i]; if (!it) return;
+  const step = qtyStep(it.id, it.g);
+  it.g = Math.max(0, FOODS[it.id].u ? Math.round(it.g / step) * step + dir * step : Math.round((it.g + dir * step) / 5) * 5);
+  if (it.g <= 0){ items.splice(i, 1); toast(FOODS[it.id].n + ' quitado de esta comida'); }
+  save(); render();
+}
 function logMeal(m, status, extra = {}){
   const k = dayKey(), day = getDay(k), D = computeDay(k);
   const prev = day.meals[m] ? structuredClone(day.meals[m]) : null;
@@ -757,12 +786,17 @@ function logMeal(m, status, extra = {}){
   day.meals[m] = Object.assign({status, at: extra.at ?? nowMin(), items}, extra);
   if (status === 'skipped') { day.meals[m].items = []; delete day.meals[m].at; }
   day.meals[m].items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid) keepFood(it.id); });
+  const prevEdit = day.planEdit && day.planEdit[m]; if (prevEdit) delete day.planEdit[m]; // ya está registrada
   // marcar el batido como tomado si iba con la cena
   if (m === 'cena' && D.meals.merienda && D.meals.merienda.merged && status !== 'skipped'){
     day.meals.merienda = {status:'done', at: day.meals[m].at, items: []};
   }
   save(); render();
-  toast(status === 'skipped' ? MEAL_NAME[m] + ' saltada: recoloco el día' : MEAL_NAME[m] + ' registrada', () => { if (prev) day.meals[m] = prev; else delete day.meals[m]; save(); render(); });
+  toast(status === 'skipped' ? MEAL_NAME[m] + ' saltada: recoloco el día' : MEAL_NAME[m] + ' registrada', () => {
+    if (prev) day.meals[m] = prev; else delete day.meals[m];
+    if (prevEdit){ day.planEdit = day.planEdit || {}; day.planEdit[m] = prevEdit; }
+    save(); render();
+  });
 }
 
 let sheetCleanup = null; // p. ej. apagar la cámara al cerrar o cambiar de hoja
@@ -784,7 +818,8 @@ function sheetMore(m){
   <div class="stack">
     <button class="opt sel" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
     <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
-    <button class="opt" data-x="edit"><span>✏️ Con cambios</span><span class="d">ajusta gramos o alimentos</span></button>
+    <button class="opt" data-x="plan"><span>🗓️ Planificar cambios</span><span class="d">sin marcarla como hecha</span></button>
+    <button class="opt" data-x="edit"><span>✏️ Hecha con cambios</span><span class="d">lo que comiste de verdad</span></button>
     <button class="opt" data-x="scan"><span>📷 Escanear lo que he comido</span><span class="d">código de barras</span></button>
     <button class="opt" data-x="other"><span>🍽️ Comí otra cosa / fuera</span><span class="d">ligero, normal, copioso…</span></button>
     <button class="opt" data-x="skip"><span>⏭️ Me la salto</span><span class="d">se recoloca el resto</span></button>
@@ -797,6 +832,7 @@ function sheetMore(m){
       if (a === 'at') el.querySelector('#atbox').hidden = false;
       if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
       if (a === 'edit') sheetEdit(m);
+      if (a === 'plan') sheetEdit(m, null, 'plan');
       if (a === 'scan') sheetScan(id => sheetEdit(m, M.items.map(x => ({id:x.id, g:x.g})).concat({id, g:FOODS[id].u || 100})), 'Se añade a lo previsto; quita lo que no hayas comido.');
       if (a === 'other') sheetOther(m);
       if (a === 'skip'){ closeSheet(); logMeal(m, 'skipped'); }
@@ -810,9 +846,10 @@ function foodResults(el, sel, ids, extraHtml = () => ''){
     return `<button class="opt" data-pick="${id}"><span>${(S.despensa || {})[id] ? '🏠 ' : ''}${esc(F.n)}${F.q === 'b' ? ' <span class="muted" style="font-size:12px">(dato aproximado)</span>' : ''}${F.tal ? ' <span class="muted" style="font-size:12px">(sin escurrir)</span>' : ''}</span><span class="d num">${extraHtml(id, F) || `${R(F.k)} kcal · ${R(F.p)} g P`}</span></button>`; }).join('')
     : `<div class="empty">Sin resultados</div>`;
 }
-function sheetEdit(m, init = null){
-  const k = dayKey(), D = computeDay(k);
-  let items = init || D.meals[m].items.map(x => ({id:x.id, g:x.g}));
+// mode 'log' = registrar lo que has comido · 'plan' = fijar lo que vas a comer, sin marcarla como hecha
+function sheetEdit(m, init = null, mode = 'log'){
+  const k = dayKey(), D = computeDay(k), plan = mode === 'plan';
+  let items = init || D.meals[m].items.filter(x => !(plan && x.fromBatido)).map(x => ({id:x.id, g:x.g}));
   const sum = el => { const t = sumItems(items); el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`; };
   const draw = el => {
     el.querySelector('#ed').innerHTML = items.map((it,i)=>{
@@ -823,14 +860,14 @@ function sheetEdit(m, init = null){
         <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
     sum(el);
   };
-  sheet(`<h2>${MEAL_NAME[m]} con cambios</h2><div class="sub">Pon lo que has comido de verdad.</div>
+  sheet(`<h2>${plan ? 'Planificar ' + MEAL_NAME[m].toLowerCase() : MEAL_NAME[m] + ' con cambios'}</h2><div class="sub">${plan ? 'Ajusta lo que vas a comer. No se marca como hecha: el resto del día se recoloca con esto.' : 'Pon lo que has comido de verdad.'}</div>
     <div id="ed"></div>
     <label class="f">Añadir alimento</label>
     <div class="row"><input id="addq" type="search" placeholder="Busca: pavo, yogur proteínas, tortitas…" autocomplete="off"><button class="btn sm" data-x="scan" aria-label="Escanear código">📷</button></div>
     <div id="addres" class="stack" style="margin-top:8px"></div>
     <div class="muted num" id="edsum" style="margin:14px 0 8px"></div>
-    <label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), D.meals[m].t))}
-    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    ${plan ? '' : `<label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), D.meals[m].t))}`}
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">${plan ? 'Aplicar al plan' : 'Guardar'}</button></div>`, el => {
     draw(el);
     const showRes = () => { const q = el.querySelector('#addq').value.trim(); if (!q){ el.querySelector('#addres').innerHTML = ''; return; } foodResults(el, '#addres', searchFoods(q, {limit:12})); };
     loadMDB().then(showRes).catch(() => {});
@@ -841,9 +878,15 @@ function sheetEdit(m, init = null){
       const p = e.target.closest('[data-pick]');
       if (p){ const id = p.dataset.pick; useMDB(id); items.push({id, g: FOODS[id].u || 100}); el.querySelector('#addq').value = ''; el.querySelector('#addres').innerHTML = ''; draw(el); return; }
       const x = e.target.closest('[data-x]'); if (!x) return;
-      if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100})));
+      if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100}), mode));
       if (x.dataset.x === 'cancel') closeSheet();
-      if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0)}); }
+      if (x.dataset.x === 'ok' && plan){
+        const day = getDay(k); day.planEdit = day.planEdit || {};
+        day.planEdit[m] = items.filter(i => i.g > 0);
+        day.planEdit[m].forEach(i => { if (FOODS[i.id].mid) keepFood(i.id); });
+        save(); closeSheet(); render(); toast(MEAL_NAME[m] + ' planificada: el resto del día se ha recolocado');
+      }
+      else if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0)}); }
     });
   });
 }
@@ -915,12 +958,13 @@ function sheetOther(m){
 }
 
 function sheetSwap(m, i){
-  const k = dayKey(), D = computeDay(k), it = D.meals[m].items[i];
-  const base = basePlan(k, D.sch, {noSwaps:true})[m][i];
+  const k = dayKey(), D = computeDay(k), it = D.meals[m].items[i], locked = !!D.meals[m].locked;
+  // en una comida con cantidades fijadas se cambia lo que hay ahora; si no, se parte del plan original
+  const base = locked ? it : basePlan(k, D.sch, {noSwaps:true})[m][i];
   const orig = base.id, origG = base.g;
   const grp = FOODS[orig].g;
-  const alts = ALTS[grp].filter(a => FOODS[a].sec || a === 'agua');
-  sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${GROUP_NAME[grp].toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
+  const alts = (ALTS[grp] || []).filter(a => FOODS[a].sec || a === 'agua');
+  sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${(GROUP_NAME[grp] || 'alimento').toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
     <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = S.pantry[a]==='falta';
       return `<button class="opt ${a===it.id?'sel':''}" data-a="${a}" data-g="${g}"><span>${esc(FOODS[a].n)}${miss?' <span style="color:var(--coral);font-size:12px">(no hay)</span>':''}</span><span class="d num">${amount(a,g)}</span></button>`; }).join('')}</div>
     <h3 class="sec">Más opciones de Mercadona</h3>
@@ -943,8 +987,12 @@ function sheetSwap(m, i){
       const pick = e.target.closest('[data-pick]');
       const a = e.target.closest('[data-a]') || (pick && {dataset:{a:pick.dataset.pick}});
       if (a){
-        day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
-        if (a.dataset.a === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:a.dataset.a}; keepFood(a.dataset.a); }
+        const to = a.dataset.a;
+        if (locked){ const pe = planItems(m); if (pe[i]) pe[i] = {id:to, g:equiv(orig, origG, to)}; if (FOODS[to].mid) keepFood(to); }
+        else {
+          day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
+          if (to === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:to}; keepFood(to); }
+        }
         save(); closeSheet(); render(); return;
       }
       const x = e.target.closest('[data-x]');
@@ -1502,6 +1550,8 @@ app.addEventListener('click', async e => {
   else if (a === 'more') sheetMore(m);
   else if (a === 'undo'){ const day = getDay(dayKey()); const prev = day.meals[m]; delete day.meals[m]; if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
   else if (a === 'swap') sheetSwap(m, +b.dataset.i);
+  else if (a === 'qty') changeQty(m, +b.dataset.i, +b.dataset.d);
+  else if (a === 'planreset'){ const day = getDay(dayKey()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
   else if (a === 'minimo'){ const day = getDay(dayKey()); day.minimo = !day.minimo; save(); render(); }
