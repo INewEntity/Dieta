@@ -32,8 +32,10 @@
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:16px;line-height:1.4}
 body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
-input,select{font:inherit;color:var(--text);background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px 12px;width:100%}
-input:focus,select:focus{outline:2px solid var(--lime);outline-offset:1px}
+input,select,textarea{font:inherit;color:var(--text);background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px 12px;width:100%}
+textarea{resize:vertical;min-height:96px}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--lime);outline-offset:1px}
+button:disabled{opacity:.6}
 .num{font-variant-numeric:tabular-nums}
 main{max-width:560px;margin:0 auto;padding:16px 16px 24px}
 header.top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 14px}
@@ -146,7 +148,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 1;
+const VERSION = 2;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -233,8 +235,8 @@ const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov
 
 /* ===================== Estado ===================== */
 const DEFAULTS = {
-  settings:{wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',notif:false,theme:'auto'},
-  days:{}, weights:{}, waist:{}, pantry:{}, shop:{},
+  settings:{kcal:2500,prot:160,wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',notif:false,theme:'auto',aiModel:'claude-opus-5-5'},
+  days:{}, weights:{}, waist:{}, pantry:{}, shop:{}, ai:{spent:{}, calls:{}},
 };
 let S;
 function load(){
@@ -327,14 +329,29 @@ function schedule(k){
 
 /* ===================== Plan del día y motor de ajuste ===================== */
 function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
-function basePlan(k, sch){
+// Escala el plan del día al objetivo: primero la proteína, luego hidratos y grasa.
+// Fruta y verdura no se tocan. El batido (días de entreno) entra dentro del total.
+function fitToTarget(plan){
+  const all = Object.values(plan).flat();
+  const kT = +S.settings.kcal || 2500, pT = +S.settings.prot || 160;
+  const prot = all.filter(it => FOODS[it.id].g === 'prot');
+  const pProt = prot.reduce((a,it) => a + mac(it.id, it.g).p, 0), pOther = sumItems(all).p - pProt;
+  if (pProt > 0){ const sp = Math.max(0.6, Math.min(1.5, (pT - pOther) / pProt)); prot.forEach(it => it.g = roundG(it.id, it.g * sp)); }
+  const cf = all.filter(it => FOODS[it.id].g === 'carb' || FOODS[it.id].g === 'grasa');
+  const kCF = cf.reduce((a,it) => a + mac(it.id, it.g).k, 0), k1 = sumItems(all).k;
+  if (kCF > 0){ const s = Math.max(0.35, Math.min(1.8, 1 + (kT - k1) / kCF)); cf.forEach(it => it.g = roundG(it.id, it.g * s)); }
+}
+function basePlan(k, sch, opts = {}){
   const wd = keyToDate(k).getDay(), day = getDay(k);
   const plan = {desayuno:mkItems(DESAYUNO), almuerzo:mkItems(WEEK[wd].almuerzo), cena:mkItems(WEEK[wd].cena)};
   if (sch.tr.on) plan.merienda = mkItems(BATIDO);
+  fitToTarget(plan);
+  if (opts.noSwaps) return plan;
   for (const m in plan){
     const sw = (day.swaps || {})[m] || {};
     plan[m] = plan[m].map((it, i) => {
-      if (sw[i]) return {id:sw[i].id, g:sw[i].g, from:it.id, why:'cambio'};
+      const to = sw[i] && sw[i].id;
+      if (to && to !== it.id) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
       if (S.pantry[it.id] === 'falta'){
         const alt = ALTS[FOODS[it.id].g].find(a => a !== it.id && S.pantry[a] !== 'falta' && (FOODS[a].sec || a === 'agua'));
         if (alt) return {id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'};
@@ -347,8 +364,10 @@ function basePlan(k, sch){
 }
 function consumedOf(log){
   if (!log || log.status === 'pending' || log.status === 'skipped') return ZERO;
-  if (log.status === 'other') return {k:log.other.k,p:log.other.p,c:log.other.c,f:log.other.f};
-  return sumItems(log.items || []);
+  let t = sumItems(log.items || []);
+  (log.extra || []).forEach(e => { t = addM(t, {k:e.k, p:e.p, c:e.c, f:e.f}); });
+  if (log.other) t = addM(t, {k:log.other.k, p:log.other.p, c:log.other.c, f:log.other.f});
+  return t;
 }
 
 function computeDay(k){
@@ -363,7 +382,7 @@ function computeDay(k){
     meals[m] = {key:m, t:t.t, status:t.status, merged:!!t.merged, items:plan[m].map(x=>Object.assign({}, x)), base:planned, log, notes:[]};
     if (t.status !== 'pending'){
       const c = consumedOf(log); consumed = addM(consumed, c); bal = addM(bal, addM(c, planned, -1));
-      meals[m].items = log.status === 'other' ? [] : (log.items || []).map(x=>Object.assign({}, x));
+      meals[m].items = (log.items || []).map(x=>Object.assign({}, x));
     }
   }
   // el batido que no cabe va con la cena
@@ -401,8 +420,19 @@ function computeDay(k){
       let cut = net;
       const g1 = scaleGroup(pending.map(m=>meals[m]), 'carb', -cut, 0.6); cut += g1.k;
       let g2 = ZERO; if (cut > 40) { g2 = scaleGroup(pending.map(m=>meals[m]), 'grasa', -cut, 1); cut += g2.k; }
-      added = addM(added, addM(g1, g2));
-      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado hidratos${g2.k<0?' y grasa':''} de lo que queda, sin tocar la proteína.${cut > 150 ? ' No pasa nada: mañana, normal.' : ''}`});
+      // si además sobra proteína, también se puede recortar, sin bajar del objetivo del día
+      let g3 = ZERO;
+      if (cut > 40){
+        const pendP = pending.reduce((a,m) => a + sumItems(meals[m].items).p, 0);
+        const spareP = consumed.p + pendP - target.p;
+        const protIt = pending.flatMap(m => meals[m].items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido));
+        const pk = protIt.reduce((a,it) => a + mac(it.id,it.g).k, 0), pp = protIt.reduce((a,it) => a + mac(it.id,it.g).p, 0);
+        if (spareP > 8 && pp > 0){ g3 = scaleGroup(pending.map(m=>meals[m]), 'prot', -Math.min(cut, spareP * pk / pp), 0.5); cut += g3.k; }
+      }
+      added = addM(added, addM(addM(g1, g2), g3));
+      const parts = ['hidratos'].concat(g2.k < 0 ? ['grasa'] : [], g3.k < 0 ? ['la proteína que ya te sobraba'] : []);
+      const what = parts.length > 1 ? parts.slice(0,-1).join(', ') + ' y ' + parts[parts.length-1] : parts[0];
+      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${what} de lo que queda${g3.k<0?' (sigues llegando a tu proteína)':', sin tocar la proteína'}.${cut > 150 ? ' No pasa nada: mañana, normal.' : ''}`});
     }
   }
   // 3) Cena tardía
@@ -558,7 +588,13 @@ function mealCard(M, now){
     : st === 'skipped' ? `<span class="badge skip">Saltada</span>`
     : now > M.t + 45 ? `<span class="badge late">Pendiente</span>` : `<span class="badge">${R(sumItems(M.items).p)} g prot.</span>`;
   let items = '';
-  if (st === 'other') items = `<ul class="items"><li><span>${esc(M.log.other.label)}</span><span class="amt num">${R(M.log.other.k)} kcal · ${R(M.log.other.p)} g prot.</span></li></ul>`;
+  if (st !== 'pending' && st !== 'skipped'){
+    const rows = M.items.map(it => `<li><span>${esc(FOODS[it.id].n)}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`);
+    (M.log && M.log.extra || []).forEach(e => rows.push(`<li><span>${esc(e.n)}</span><span class="amt num">${R(e.g)} g · ${R(e.k)} kcal</span></li>`));
+    if (M.log && M.log.other) rows.push(`<li><span>${esc(M.log.other.label)}</span><span class="amt num">${R(M.log.other.k)} kcal · ${R(M.log.other.p)} g prot.</span></li>`);
+    if (rows.length) items = `<ul class="items">${rows.join('')}</ul>`;
+    if (M.log && M.log.resumen) items += `<div class="evnote">✨ ${esc(M.log.resumen)}</div>`;
+  }
   else if (st !== 'skipped') items = `<ul class="items">${M.items.map((it,i)=>{
       const cls = it.added ? 'plus' : it.delta > 0 ? 'plus' : it.delta < 0 ? 'minus' : it.missing ? 'miss' : '';
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
@@ -605,6 +641,7 @@ function sheetMore(m){
   const k = dayKey(), D = computeDay(k), M = D.meals[m];
   sheet(`<h2>${MEAL_NAME[m]}</h2><div class="sub">Prevista a las ${fmt(M.t)}</div>
   <div class="stack">
+    <button class="opt sel" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
     <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
     <button class="opt" data-x="edit"><span>✏️ Con cambios</span><span class="d">ajusta gramos o alimentos</span></button>
     <button class="opt" data-x="other"><span>🍽️ Comí otra cosa / fuera</span><span class="d">ligero, normal, copioso…</span></button>
@@ -614,6 +651,7 @@ function sheetMore(m){
     el.addEventListener('click', e => {
       const x = e.target.closest('[data-x]'); if (!x) return;
       const a = x.dataset.x;
+      if (a === 'ai') sheetAI(m);
       if (a === 'at') el.querySelector('#atbox').hidden = false;
       if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
       if (a === 'edit') sheetEdit(m);
@@ -658,6 +696,7 @@ function sheetEdit(m){
 function sheetOther(m){
   let sel = 'normal';
   sheet(`<h2>Comí otra cosa</h2><div class="sub">Una estimación vale. El resto del día se ajusta solo.</div>
+    <button class="opt sel" data-x="ai" style="margin-bottom:8px"><span>✨ Mejor: descríbelo a la IA</span><span class="d">más preciso</span></button>
     <div class="stack" id="pre">${Object.entries(OTHER_PRESETS).map(([id,p])=>`<button class="opt ${id===sel?'sel':''}" data-p="${id}"><span>${p.label}</span><span class="d num">~${p.k} kcal · ${p.p} g prot.</span></button>`).join('')}
       <button class="opt" data-p="custom"><span>Lo sé más o menos</span><span class="d">pon kcal y proteína</span></button></div>
     <div id="cust" hidden><div class="row"><div style="flex:1"><label class="f">Kcal</label><input type="number" inputmode="numeric" id="ck" value="800"></div><div style="flex:1"><label class="f">Proteína (g)</label><input type="number" inputmode="numeric" id="cp" value="35"></div></div></div>
@@ -669,6 +708,7 @@ function sheetOther(m){
       if (p){ sel = p.dataset.p; el.querySelectorAll('[data-p]').forEach(b=>b.classList.toggle('sel', b === p)); el.querySelector('#cust').hidden = sel !== 'custom'; }
       const x = e.target.closest('[data-x]'); if (!x) return;
       if (x.dataset.x === 'cancel') return closeSheet();
+      if (x.dataset.x === 'ai') return sheetAI(m);
       let o;
       if (sel === 'custom'){ const kc = +el.querySelector('#ck').value || 0, pr = +el.querySelector('#cp').value || 0, rest = Math.max(0, kc - pr*4); o = {k:kc, p:pr, c:rest*0.55/4, f:rest*0.45/9, label:'Comida fuera'}; }
       else o = Object.assign({}, OTHER_PRESETS[sel]);
@@ -681,8 +721,8 @@ function sheetOther(m){
 
 function sheetSwap(m, i){
   const k = dayKey(), D = computeDay(k), it = D.meals[m].items[i];
-  const base = basePlan(k, D.sch)[m][i];
-  const orig = base.from || base.id, origG = base.from ? WEEKG(m, i, k) : base.g;
+  const base = basePlan(k, D.sch, {noSwaps:true})[m][i];
+  const orig = base.id, origG = base.g;
   const grp = FOODS[orig].g;
   const alts = ALTS[grp].filter(a => FOODS[a].sec || a === 'agua');
   sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${GROUP_NAME[grp].toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
@@ -694,7 +734,7 @@ function sheetSwap(m, i){
       const a = e.target.closest('[data-a]');
       if (a){
         day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
-        if (a.dataset.a === orig) delete day.swaps[m][i]; else day.swaps[m][i] = {id:a.dataset.a, g:+a.dataset.g};
+        if (a.dataset.a === orig) delete day.swaps[m][i]; else day.swaps[m][i] = {id:a.dataset.a};
         save(); closeSheet(); render(); return;
       }
       const x = e.target.closest('[data-x]');
@@ -702,7 +742,6 @@ function sheetSwap(m, i){
     });
   });
 }
-function WEEKG(m, i, k){ const wd = keyToDate(k).getDay(); const arr = m === 'desayuno' ? DESAYUNO : m === 'merienda' ? BATIDO : WEEK[wd][m]; return arr[i][1]; }
 
 function sheetWake(){
   const day = getDay(dayKey());
@@ -739,6 +778,166 @@ function sheetTrain(){
       day.train.on = true; day.train.time = el.querySelector('#tt').value; day.train.dur = dur;
       if (x.dataset.x === 'done') day.train.done = !tr.done;
       save(); closeSheet(); render();
+    });
+  });
+}
+
+/* ===================== IA: describir lo que has comido ===================== */
+// Precios por millón de tokens (entrada / salida), para estimar el gasto de cada consulta.
+const AI_MODELS = {
+  'claude-opus-5-5':  {n:'Claude Opus 5.5',  d:'el más preciso', in:4,    out:20,   fallback:true},
+  'claude-sonnet-5-5':{n:'Claude Sonnet 5.5',d:'equilibrado',    in:2,    out:10,   fallback:true},
+  'claude-haiku-5-5': {n:'Claude Haiku 5.5', d:'el más barato',  in:0.10, out:0.50, fallback:false},
+};
+const AI_KEY = 'dieta.aikey'; // fuera del estado: no viaja en las copias de seguridad
+function aiKey(){ try{ return localStorage.getItem(AI_KEY) || ''; }catch(_){ return ''; } }
+function aiCostHint(model){ const p = AI_MODELS[model]; return '~' + ((2500*p.in + 700*p.out) / 1e6).toFixed(3).replace('.', ',') + ' $'; }
+let _Anthropic = null;
+async function loadSDK(){
+  if (!_Anthropic) _Anthropic = (await import('https://esm.sh/@anthropic-ai/sdk@0.131.0')).default;
+  return _Anthropic;
+}
+function aiSystem(){
+  const db = Object.entries(FOODS).filter(([id,F]) => F.sec).map(([id,F]) =>
+    `${id}: ${F.n} — por 100 ${F.ml?'ml':'g'}: ${F.k} kcal, ${F.p} g prot, ${F.c} g hidratos, ${F.f} g grasa${F.u ? ` (1 unidad ≈ ${F.u} g)` : ''}`).join('\n');
+  return `Eres el asistente de nutrición de una app de dieta personal. El usuario cuenta (a veces con una foto) lo que ha comido en una comida concreta. Conviertes eso en un registro fiable, porque la app recalcula con él el resto del día: si sobrestimas o infraestimas, las siguientes comidas salen mal ajustadas.
+
+Base de datos de alimentos de la app:
+${db}
+
+Cómo rellenar la respuesta:
+- accion: "hecha" si comió lo del plan tal cual; "cambios" si es el plan con modificaciones; "otra" si comió algo distinto; "saltada" si no comió.
+- items: alimentos de la base de datos con sus gramos. En "hecha" y "cambios" pon la lista completa de lo que comió de verdad, no solo lo que cambia. El arroz y la pasta de la base de datos están en crudo: si te dan cantidades cocinadas, conviértelas (1 g crudo ≈ 2,5–3 g cocido). Huevos y fruta en gramos (usa el peso por unidad).
+- extras: lo que no esté en la base de datos, con gramos y macros totales de esa cantidad. Usa raciones típicas de España si no se dicen. En comidas de restaurante o fritos cuenta el aceite que no se ve.
+- hora: "HH:MM" si la menciona; si no, cadena vacía.
+- confianza: "baja" si has tenido que suponer bastante.
+- resumen: una frase corta en español con lo registrado.
+- consejo: como mucho una frase útil para el resto del día, o cadena vacía. No sermonees.`;
+}
+function aiSchema(){
+  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec);
+  return {
+    type:'object', additionalProperties:false,
+    required:['accion','items','extras','hora','confianza','resumen','consejo'],
+    properties:{
+      accion:{type:'string', enum:['hecha','cambios','otra','saltada']},
+      items:{type:'array', items:{type:'object', additionalProperties:false, required:['id','g'], properties:{id:{type:'string', enum:ids}, g:{type:'number'}}}},
+      extras:{type:'array', items:{type:'object', additionalProperties:false, required:['nombre','g','kcal','p','c','f'],
+        properties:{nombre:{type:'string'}, g:{type:'number'}, kcal:{type:'number'}, p:{type:'number'}, c:{type:'number'}, f:{type:'number'}}}},
+      hora:{type:'string'}, confianza:{type:'string', enum:['alta','media','baja']},
+      resumen:{type:'string'}, consejo:{type:'string'},
+    },
+  };
+}
+async function aiAnalyze({m, items, text, photo, at}){
+  const Anthropic = await loadSDK();
+  const client = new Anthropic({apiKey: aiKey(), dangerouslyAllowBrowser: true});
+  const model = AI_MODELS[S.settings.aiModel] ? S.settings.aiModel : 'claude-opus-5-5';
+  const ctx = {comida: MEAL_NAME[m], hora_actual: fmt(nowMin()), hora_elegida_en_la_app: fmt(at),
+    plan_de_esta_comida: items.map(it => ({id: it.id, alimento: FOODS[it.id].n, g: R(it.g)}))};
+  const content = [];
+  if (photo) content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}});
+  content.push({type:'text', text:`Contexto de la app:\n${JSON.stringify(ctx)}\n\nLo que cuenta el usuario:\n${text || '(sin texto: usa la foto)'}`});
+  const params = {model, max_tokens:8000, system:aiSystem(), messages:[{role:'user', content}],
+    output_config:{effort:'low', format:{type:'json_schema', schema:aiSchema()}}};
+  let res;
+  if (AI_MODELS[model].fallback) res = await client.beta.messages.create(Object.assign(params, {betas:['server-side-fallback-2026-07-01'], fallbacks:'default'}));
+  else res = await client.messages.create(params);
+  const u = res.usage || {}, p = AI_MODELS[model];
+  S.ai.spent[model] = (S.ai.spent[model] || 0) + ((u.input_tokens || 0) * p.in + (u.output_tokens || 0) * p.out) / 1e6;
+  S.ai.calls[model] = (S.ai.calls[model] || 0) + 1; save();
+  if (res.stop_reason === 'refusal') throw new Error('La IA no ha querido analizar esto. Usa las opciones manuales.');
+  if (res.stop_reason === 'max_tokens') throw new Error('La respuesta de la IA se cortó. Prueba con una descripción más corta.');
+  const txt = res.content.filter(b => b.type === 'text').map(b => b.text).join('');
+  return JSON.parse(txt);
+}
+function aiErrorText(e){
+  const A = _Anthropic;
+  if (A && e instanceof A.AuthenticationError) return 'La API key no es válida. Revísala en Ajustes.';
+  if (A && e instanceof A.PermissionDeniedError) return 'Tu key no tiene acceso a ese modelo. Prueba otro en Ajustes.';
+  if (A && e instanceof A.RateLimitError) return 'Demasiadas consultas seguidas. Espera un momento.';
+  if (A && e instanceof A.BadRequestError) return 'Anthropic ha rechazado la consulta: ' + e.message;
+  if (A && e instanceof A.APIConnectionError) return 'Sin conexión con la IA. Usa las opciones manuales.';
+  if (A && e instanceof A.APIError) return 'Error de la IA: ' + e.message;
+  if (e instanceof SyntaxError) return 'No he entendido la respuesta de la IA. Vuelve a intentarlo.';
+  if (!A) return 'No se ha podido cargar la IA (¿sin conexión?).';
+  return e.message || 'Algo ha fallado.';
+}
+function readPhoto(file){
+  return new Promise((ok, ko) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(1, 1024 / Math.max(img.width, img.height)), c = document.createElement('canvas');
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      ok(c.toDataURL('image/jpeg', 0.82).split(',')[1]);
+    };
+    img.onerror = ko; img.src = url;
+  });
+}
+let aiDraft = {text:'', photo:null};
+function sheetAI(m){
+  if (!aiKey()){ closeSheet(); TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
+  const k = dayKey(), M = computeDay(k).meals[m];
+  sheet(`<h2>✨ ${MEAL_NAME[m]}: ¿qué has comido?</h2>
+    <div class="sub">Cuéntalo como se lo dirías a alguien: «la mitad de la patata y un yogur», «menú del día: lentejas, lomo con patatas y flan», «me la he saltado».</div>
+    <textarea id="aitxt" rows="4" placeholder="Escribe aquí…">${esc(aiDraft.text)}</textarea>
+    <div class="row" style="margin-top:8px"><label class="btn sm" style="cursor:pointer">📷 Foto<input type="file" accept="image/*" capture="environment" id="aiph" hidden></label><span class="muted" id="phst" style="font-size:13px">${aiDraft.photo ? 'Foto añadida ✓' : 'Opcional'}</span></div>
+    <label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), M.t))}
+    <div id="aierr" class="tips" style="margin-top:10px"></div>
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="go">Analizar</button></div>
+    <div class="muted" style="font-size:12px;margin-top:8px">${AI_MODELS[S.settings.aiModel].n} · ${aiCostHint(S.settings.aiModel)} por consulta</div>`, el => {
+    el.querySelector('#aiph').addEventListener('change', async e => {
+      const f = e.target.files[0]; if (!f) return;
+      try{ aiDraft.photo = await readPhoto(f); el.querySelector('#phst').textContent = 'Foto añadida ✓'; }catch(_){ el.querySelector('#phst').textContent = 'No se pudo leer la foto'; }
+    });
+    el.addEventListener('click', async e => {
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'cancel'){ aiDraft = {text:'', photo:null}; return closeSheet(); }
+      const text = el.querySelector('#aitxt').value.trim(); aiDraft.text = text;
+      if (!text && !aiDraft.photo) return toast('Escribe algo o añade una foto');
+      let at = toMin(el.querySelector('#at').value); if (at < 300) at += 1440;
+      x.disabled = true; x.textContent = 'Analizando…'; el.querySelector('#aierr').innerHTML = '';
+      try{
+        const r = await aiAnalyze({m, items:M.items, text, photo:aiDraft.photo, at});
+        sheetAIReview(m, r, at);
+      }catch(err){
+        el.querySelector('#aierr').innerHTML = `<li class="coral">${esc(aiErrorText(err))}</li>`;
+        x.disabled = false; x.textContent = 'Analizar';
+      }
+    });
+  });
+}
+function sheetAIReview(m, r, at){
+  const items = (r.items || []).filter(it => FOODS[it.id] && it.g > 0).map(it => ({id:it.id, g:it.g}));
+  const extras = (r.extras || []).filter(e => e.g >= 0).map(e => ({n:e.nombre, g:e.g, k:e.kcal, p:e.p, c:e.c, f:e.f}));
+  if (/^\d{1,2}:\d{2}$/.test(r.hora || '')){ at = toMin(r.hora); if (at < 300) at += 1440; }
+  const status = {hecha:'done', cambios:'changed', otra:'other', saltada:'skipped'}[r.accion] || 'changed';
+  const label = {done:'Hecha tal cual', changed:'Con cambios', other:'Otra cosa', skipped:'Saltada'}[status];
+  const draw = el => {
+    const rows = items.map((it,i) => { const F = FOODS[it.id];
+      return `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(F.n)}</div><input type="number" inputmode="decimal" min="0" step="${F.u?1:5}" value="${F.u ? Math.round(it.g/F.u) : R(it.g)}" data-i="${i}" style="width:84px"><span class="muted" style="width:46px;font-size:13px">${F.u?F.un[1]:F.ml?'ml':'g'}</span><button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; })
+      .concat(extras.map((e,i) => `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(e.n)}<div class="muted num" style="font-size:12px">${R(e.g)} g · ${R(e.k)} kcal · ${R(e.p)} g prot.</div></div><button class="btn sm ghost" data-delx="${i}" aria-label="Quitar">✕</button></div>`));
+    el.querySelector('#rv').innerHTML = status === 'skipped' ? '' : (rows.join('') || '<div class="empty">Sin alimentos</div>');
+    const t = consumedOf({status:'changed', items, extra:extras});
+    el.querySelector('#rvsum').textContent = status === 'skipped' ? '' : `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`;
+  };
+  sheet(`<h2>${MEAL_NAME[m]}: ${label.toLowerCase()}</h2>
+    <div class="sub">${esc(r.resumen || '')} <span class="badge ${r.confianza==='baja'?'late':''}">confianza ${esc(r.confianza || 'media')}</span></div>
+    <div id="rv"></div><div class="muted num" id="rvsum" style="margin:10px 0"></div>
+    ${r.consejo ? `<ul class="tips"><li>${esc(r.consejo)}</li></ul>` : ''}
+    <div class="muted" style="font-size:13px">Hora: ${fmt(at)}. Puedes corregir los gramos antes de guardar.</div>
+    <div class="evactions"><button class="btn ghost" data-x="back">Corregir texto</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    draw(el);
+    el.addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id], v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; });
+    el.addEventListener('click', e => {
+      if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); return draw(el); }
+      if (e.target.dataset.delx != null){ extras.splice(+e.target.dataset.delx, 1); return draw(el); }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'back') return sheetAI(m);
+      aiDraft = {text:'', photo:null}; closeSheet();
+      if (status === 'skipped') return logMeal(m, 'skipped');
+      logMeal(m, status, {at, items:items.filter(i => i.g > 0), extra:extras, resumen:r.resumen || ''});
     });
   });
 }
@@ -814,8 +1013,8 @@ function renderProgreso(){
   let advice = 'Necesito al menos 3 semanas con 3 o más pesadas para recomendarte algo. Sigue así.';
   if (full.length >= 3){
     const [a,b,c] = full.slice(-3).map(w=>w.avg), d1 = b-a, d2 = c-b;
-    if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: añade <b>+150 kcal</b> (por ejemplo, +30 g de arroz o pasta en el almuerzo). Díselo a tu entrenador para actualizar el plan.`;
-    else if (d2 > 0.35) advice = `<b>Subes más de 0,35 kg/semana</b>: quita la avena del batido y revisamos la cintura.`;
+    if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
+    else if (d2 > 0.35) advice = `<b>Subes más de 0,35 kg/semana</b>: demasiado rápido, parte será grasa.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="-150">Bajar a ${(+S.settings.kcal)-150} kcal</button></div>`;
     else advice = `Ritmo correcto (${d2>=0?'+':''}${d2.toFixed(2).replace('.',',')} kg la última semana). <b>No toques nada.</b>`;
   } else if (full.length === 2){ const d = full[1].avg - full[0].avg; advice = `Última semana: <b>${d>=0?'+':''}${d.toFixed(2).replace('.',',')} kg</b>. Objetivo: +0,15 a +0,25 kg/semana. Con una semana más te digo si hay que ajustar.`; }
   h += `<ul class="tips"><li>${advice}</li></ul>`;
@@ -858,7 +1057,22 @@ function chart(keys){
 /* ===================== Ajustes ===================== */
 function renderAjustes(){
   const s = S.settings;
+  const spent = Object.values(S.ai.spent).reduce((a,b)=>a+b,0), calls = Object.values(S.ai.calls).reduce((a,b)=>a+b,0);
   app.innerHTML = `<header class="top"><div><h1>Ajustes</h1><div class="sub">Son puntos de partida: cada día se puede cambiar todo desde «Hoy».</div></div></header>
+  <div class="card">
+    <label class="f" style="margin-top:0">Objetivo diario</label>
+    <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Calorías</label><input type="number" inputmode="numeric" step="50" min="1200" max="5000" data-s="kcal" value="${s.kcal}"></div>
+      <div style="flex:1"><label class="f" style="margin-top:0">Proteína (g)</label><input type="number" inputmode="numeric" step="5" min="60" max="300" data-s="prot" value="${s.prot}"></div></div>
+    <div class="muted" style="font-size:13px;margin-top:8px">Las cantidades de cada comida se recalculan solas: primero se ajusta la proteína y luego los hidratos y la grasa. La fruta y la verdura no cambian. Los días de entreno, el batido entra dentro de este total.</div>
+  </div>
+  <div class="card">
+    <label class="f" style="margin-top:0">✨ IA (Claude)</label>
+    <div class="row"><input type="password" id="aikey" autocomplete="off" placeholder="API key de Anthropic (sk-ant-…)" value="${aiKey() ? '••••••••••••' : ''}"><button class="btn sm pri" data-act="savekey">Guardar</button></div>
+    ${aiKey() ? '<div class="evactions" style="margin-top:8px"><button class="btn sm ghost" data-act="delkey">Borrar key</button></div>' : '<div class="muted" style="font-size:13px;margin-top:8px">Créala en console.anthropic.com → API Keys. Pon un límite de gasto mensual en la consola.</div>'}
+    <label class="f">Modelo</label>
+    <select data-s="aiModel">${Object.entries(AI_MODELS).map(([id,p]) => `<option value="${id}" ${s.aiModel===id?'selected':''}>${p.n} · ${p.d} · ${aiCostHint(id)}/consulta</option>`).join('')}</select>
+    <div class="muted num" style="font-size:13px;margin-top:8px">La key se guarda solo en este móvil y no va en las copias de seguridad.<br>Llevas ${calls} consulta${calls===1?'':'s'} · ~${spent.toFixed(3).replace('.', ',')} $ en total${calls ? ' (' + Object.keys(S.ai.calls).map(id => `${AI_MODELS[id] ? AI_MODELS[id].n.replace('Claude ','') : id}: ${S.ai.calls[id]} · ${(S.ai.spent[id]||0).toFixed(3).replace('.', ',')} $`).join(' · ') + ')' : ''}.</div>
+  </div>
   <div class="card">
     <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Despertar</label><input type="time" data-s="wake" value="${s.wake}"></div><div style="flex:1"><label class="f" style="margin-top:0">A dormir</label><input type="time" data-s="bed" value="${s.bed}"></div></div>
     <div class="row"><div style="flex:1"><label class="f">Entreno habitual</label><input type="time" data-s="trainTime" value="${s.trainTime}"></div><div style="flex:1"><label class="f">Duración (min)</label><input type="number" data-s="trainDur" value="${s.trainDur}"></div></div>
@@ -881,8 +1095,10 @@ function renderAjustes(){
   <div class="muted" style="text-align:center;font-size:12px">Versión ${VERSION}</div>`;
   app.querySelectorAll('[data-s]').forEach(inp => inp.addEventListener('change', () => {
     const key = inp.dataset.s; let v = inp.value;
-    if (['trainDur','gap'].includes(key)) v = +v;
-    S.settings[key] = v; save(); toast('Guardado');
+    if (['trainDur','gap','kcal','prot'].includes(key)) v = +v;
+    if (key === 'kcal' && !(v >= 1200 && v <= 5000)) return toast('Pon entre 1200 y 5000 kcal');
+    if (key === 'prot' && !(v >= 60 && v <= 300)) return toast('Pon entre 60 y 300 g');
+    S.settings[key] = v; save(); toast(key === 'kcal' || key === 'prot' ? 'Objetivo guardado: el plan se ha recalculado' : 'Guardado');
   }));
   app.querySelector('#imp').addEventListener('change', async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -933,6 +1149,9 @@ app.addEventListener('click', async e => {
   else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } }
   else if (a === 'tday'){ const d = +b.dataset.d, s = S.settings; s.trainDays = s.trainDays.includes(d) ? s.trainDays.filter(x=>x!==d) : s.trainDays.concat(d); save(); render(); }
   else if (a === 'theme'){ S.settings.theme = b.dataset.v; save(); render(); }
+  else if (a === 'savekey'){ const v = document.getElementById('aikey').value.trim(); if (!v || v.startsWith('•')) return toast('Pega tu API key'); if (!v.startsWith('sk-ant-')) return toast('Eso no parece una key de Anthropic'); try{ localStorage.setItem(AI_KEY, v); }catch(_){} render(); toast('Key guardada en este móvil'); }
+  else if (a === 'delkey'){ try{ localStorage.removeItem(AI_KEY); }catch(_){} render(); toast('Key borrada'); }
+  else if (a === 'kcaladj'){ S.settings.kcal = (+S.settings.kcal || 2500) + (+b.dataset.v); save(); render(); toast(`Objetivo: ${S.settings.kcal} kcal. El plan se ha recalculado.`); }
   else if (a === 'notif'){
     if (!('Notification' in window)) return toast('Este navegador no permite avisos');
     const p = await Notification.requestPermission(); S.settings.notif = p === 'granted'; save(); render();
