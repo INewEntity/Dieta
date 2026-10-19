@@ -148,7 +148,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 5;
+const VERSION = 6;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -512,7 +512,7 @@ function computeDay(k){
 
   // 1) Proteína: recuperar lo que falte
   const deficitP = -bal.p;
-  if (deficitP > 4 && pending.length){
+  if (deficitP > 2 && pending.length){
     let left = deficitP;
     pending.forEach((m, i) => {
       const want = Math.min(40, left / (pending.length - i));
@@ -558,6 +558,19 @@ function computeDay(k){
     const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
     added = addM(added, got);
     meals.cena.notes.push(`<b>Cena tardía</b>: misma proteína y un 40 % menos de hidratos para dormir mejor.`);
+  }
+  // repaso final: recortar hidratos o grasa también quita algo de proteína (patata, pan, avena…).
+  // Si el día ya no llega al objetivo de proteína, se completa en lo que queda.
+  const pendLeft = pending.filter(m => meals[m].status === 'pending');
+  if (pendLeft.length){
+    let gap = target.p - consumed.p - pendLeft.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
+    if (gap > 2){
+      pendLeft.slice().reverse().forEach((m, i) => { // de la última comida hacia atrás
+        if (gap <= 2) return;
+        const got = boostProtein(meals[m], Math.min(40, gap / (pendLeft.length - i)));
+        gap -= got.p;
+      });
+    }
   }
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
@@ -650,8 +663,16 @@ function renderHoy(){
   const k = dayKey(), D = computeDay(k), day = getDay(k), now = nowMin();
   const d = keyToDate(k);
   const pT = D.target.p, pC = D.consumed.p, kT = D.target.k, kC = D.consumed.k;
-  const pLeft = Math.max(0, D.remainingPlan.p);
-  const kLeft = Math.max(0, D.remainingPlan.k);
+  // «Faltan» = objetivo − lo comido. Si lo que queda del plan no lo cubre exactamente (p. ej. en volumen solo se
+  // recupera la mitad de las kcal perdidas, o ya no quedan comidas), se dice aparte para que las cifras cuadren.
+  const pLeft = pT - pC, kLeft = kT - kC, hayPend = D.remainingPlan.k > 0;
+  const pTxt = pLeft <= 2 ? '✓ Objetivo cumplido'
+    : !hayPend ? `Te quedaste a <b class="num">${R(pLeft)} g</b>`
+    : `Faltan <b class="num">${R(pLeft)} g</b>` + (Math.abs(D.remainingPlan.p - pLeft) >= 3 ? ` · el resto del plan aporta ${R(D.remainingPlan.p)} g` : '');
+  const kTxt = kLeft < -50 ? `Llevas <b class="num">${R(-kLeft)} kcal</b> de más`
+    : !hayPend && kLeft <= 50 ? '✓ En tu objetivo'
+    : !hayPend ? `Te quedaste a <b class="num">${R(kLeft)} kcal</b>`
+    : `Faltan <b class="num">${R(Math.max(0, kLeft))} kcal</b>` + (hayPend && Math.abs(D.remainingPlan.k - kLeft) >= 100 ? ` · el resto del plan aporta ${R(D.remainingPlan.k)}` : '');
   const tr = D.sch.tr;
   let h = `<header class="top"><div><h1>Hoy</h1><div class="sub">${DAYS_LONG[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}</div></div>
     <button class="chip ${D.minimo?'on':''}" data-act="minimo">${D.minimo?'Día mínimo':'Día normal'}</button></header>
@@ -662,10 +683,10 @@ function renderHoy(){
   <section class="card hero" aria-label="Resumen">
     <div><div class="lbl">Proteína</div><div class="big num">${R(pC)}<span class="muted" style="font-size:20px"> / ${R(pT)} g</span></div>
       <div class="bar"><i style="width:${Math.min(100, pC/pT*100)}%"></i></div>
-      <div class="small">Quedan <b class="num">${R(pLeft)} g</b> en el plan</div></div>
+      <div class="small">${pTxt}</div></div>
     <div ${D.minimo?'style="opacity:.45"':''}><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
       <div class="bar k"><i style="width:${Math.min(100, kC/kT*100)}%"></i></div>
-      <div class="small">Quedan <b class="num">${R(kLeft)} kcal</b></div></div>
+      <div class="small">${kTxt}</div></div>
     <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.target.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.target.f)} g</span></div>
   </section>`;
   // avisos inteligentes
