@@ -148,7 +148,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 2;
+const VERSION = 3;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -235,7 +235,8 @@ const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov
 
 /* ===================== Estado ===================== */
 const DEFAULTS = {
-  settings:{kcal:2500,prot:160,wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',notif:false,theme:'auto',aiModel:'claude-opus-5-5'},
+  settings:{kcal:2500,prot:160,wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',theme:'auto',aiModel:'claude-opus-5-5',
+    avisos:{comidas:true,buenosdias:true,resumen:true,compra:true,cintura:true}},
   days:{}, weights:{}, waist:{}, pantry:{}, shop:{}, ai:{spent:{}, calls:{}},
 };
 let S;
@@ -526,7 +527,7 @@ function render(){
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === TAB ? 'page' : 'false'));
   applyTheme();
   ({hoy:renderHoy, compra:renderCompra, progreso:renderProgreso, ajustes:renderAjustes})[TAB]();
-  scheduleNotifications();
+  queueSync();
 }
 function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 
@@ -1028,7 +1029,7 @@ function renderProgreso(){
   h += `<h3 class="sec">Últimos 7 días</h3><div class="card">${adherence()}</div>`;
   app.innerHTML = h;
 }
-function adherence(){
+function adherenceStats(){
   let meals = 0, ok = 0, protDays = 0, days = 0;
   for (let i = 1; i <= 7; i++){
     const k = addDays(dayKey(), -i); if (!S.days[k]) continue;
@@ -1036,8 +1037,11 @@ function adherence(){
     D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed'].includes(D.meals[m].status)) ok++; });
     if (D.consumed.p >= D.target.p * 0.9) protDays++;
   }
+  return {days, protDays, pct: meals ? R(ok/meals*100) : 0};
+}
+function adherence(){
+  const {days, protDays, pct} = adherenceStats();
   if (!days) return `<div class="empty">Aún no hay días registrados.</div>`;
-  const pct = R(ok/meals*100);
   return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
     <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>`;
 }
@@ -1082,10 +1086,11 @@ function renderAjustes(){
       <div style="flex:1"><label class="f">Cena, como muy tarde</label><input type="time" data-s="dinnerLimit" value="${s.dinnerLimit}"></div></div>
   </div>
   <div class="card">
-    <label class="f" style="margin-top:0">Recordatorios</label>
-    <button class="opt" data-act="notif"><span>${s.notif && 'Notification' in window && Notification.permission==='granted' ? '🔔 Activados' : '🔕 Activar recordatorios'}</span><span class="d">${s.notif?'con la app abierta':'pedir permiso'}</span></button>
-    <div class="muted" style="font-size:13px;margin-top:8px">De momento avisan solo con la app abierta o en segundo plano. Los avisos con la app cerrada llegan en la fase 2.</div>
-    <label class="f">Tema</label>
+    <label class="f" style="margin-top:0">🔔 Avisos (llegan aunque la app esté cerrada)</label>
+    ${pushCardHtml()}
+  </div>
+  <div class="card">
+    <label class="f" style="margin-top:0">Tema</label>
     <div class="seg">${[['auto','Auto'],['dark','Oscuro'],['light','Claro']].map(([v,l])=>`<button data-act="theme" data-v="${v}" class="${s.theme===v?'on':''}">${l}</button>`).join('')}</div>
   </div>
   <div class="card">
@@ -1107,30 +1112,118 @@ function renderAjustes(){
   });
 }
 
-/* ===================== Recordatorios (fase 1: con la app viva) ===================== */
-let timers = [];
-async function notify(title, body, tag){
-  try{ const reg = await navigator.serviceWorker.ready; reg.showNotification(title, {body, tag, icon:'icon-192.png', badge:'icon-192.png'}); }
-  catch(_){ try{ new Notification(title, {body, tag}); }catch(__){} }
+/* ===================== Avisos push (servidor en Cloudflare) ===================== */
+// La app calcula los avisos de hoy y de los próximos 7 días y se los manda al servidor;
+// el servidor los envía a su hora aunque la app esté cerrada. Se recalculan con cada cambio.
+const PUSH_API = 'https://dieta-avisos.dieta-avisos.workers.dev';
+const VAPID_PUBLIC = 'BGfejY7hZbc2tAu5C8TPfhV-hYKLUDG9hb0ke-bQ4Ykn4gmH6ILxwdaCVPGz5txBqcVVS8suqTVFmZ5EJGNYowQ';
+const PUSH_KEY = 'dieta.push'; // fuera del estado: la URL de la suscripción no viaja en las copias
+const AVISOS = [
+  ['comidas','🍳 Empezar a cocinar','30 min antes de cada comida · el batido, a su hora'],
+  ['buenosdias','☀️ Buenos días','al despertar: peso y desayuno'],
+  ['resumen','📊 Resumen semanal','domingo a las 11:00'],
+  ['compra','🛒 Compra','sábado a las 10:00, si falta algo'],
+  ['cintura','📏 Cintura','cada 2 semanas'],
+];
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+function pushState(){ try{ return JSON.parse(localStorage.getItem(PUSH_KEY)) || null; }catch(_){ return null; } }
+function setPushState(v){ try{ v ? localStorage.setItem(PUSH_KEY, JSON.stringify(v)) : localStorage.removeItem(PUSH_KEY); }catch(_){} }
+function b64ToBytes(s){ s = s.replace(/-/g,'+').replace(/_/g,'/'); const raw = atob(s + '='.repeat((4 - s.length % 4) % 4)); return Uint8Array.from(raw, c => c.charCodeAt(0)); }
+function strHash(s){ let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return String(h); }
+const postJSON = (path, data) => fetch(PUSH_API + path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+
+function pushCardHtml(){
+  const av = S.settings.avisos, ps = pushState();
+  let h = '';
+  if (!pushSupported()) h = `<div class="muted" style="font-size:14px">Este navegador no admite avisos. Abre la app instalada desde Chrome.</div>`;
+  else if (!ps || Notification.permission !== 'granted') h = `<button class="opt sel" data-act="pushon"><span>Activar avisos en este móvil</span><span class="d">pide permiso</span></button>`;
+  else h = `<div class="row"><span style="flex:1">✅ Activados en este móvil</span><button class="btn sm" data-act="pushtest">Probar</button><button class="btn sm ghost" data-act="pushoff">Quitar</button></div>
+    <div class="muted" style="font-size:12px;margin-top:6px">${ps.at ? 'Avisos sincronizados a las ' + new Date(ps.at).toTimeString().slice(0,5) : 'Sincronizando…'}</div>`;
+  h += `<div class="list" style="margin-top:10px">${AVISOS.map(([k,n,d]) => `<div class="li" style="padding-left:0;padding-right:0"><button class="check ${av[k]?'on':''}" data-act="aviso" data-k="${k}" aria-label="${n}">${av[k]?'✓':''}</button><div class="n">${n}<div class="q">${d}</div></div></div>`).join('')}</div>`;
+  return h;
 }
-function scheduleNotifications(){
-  timers.forEach(clearTimeout); timers = [];
-  if (!S.settings.notif || !('Notification' in window) || Notification.permission !== 'granted') return;
-  const k = dayKey(), D = computeDay(k), now = nowMin();
-  const at = (min, f) => { const ms = (min - now)*60000 - new Date().getSeconds()*1000; if (ms > 0 && ms < 18*3600e3) timers.push(setTimeout(f, ms)); };
-  D.sch.order.forEach(m => {
-    const M = D.meals[m]; if (M.status !== 'pending' || M.merged) return;
-    const what = M.items.slice(0,3).map(it => FOODS[it.id].n.toLowerCase()).join(', ');
-    at(M.t, () => notify(`🍽️ ${MEAL_NAME[m]} · ${fmt(M.t)}`, what + (M.notes.length ? ' · con ajustes' : ''), 'meal-'+m));
-    at(M.t + 45, () => { const D2 = computeDay(dayKey()); if (D2.meals[m].status === 'pending') notify(`${MEAL_NAME[m]} pendiente`, 'Márcala o dime qué ha pasado y recoloco el día.', 'meal-'+m); });
-  });
-  if (D.sch.tr.on && !D.sch.tr.done) at(D.sch.tr.start - 30, () => notify('🏋️ Entreno en 30 min', 'Si cambia la hora, muévelo en la app.', 'train'));
-  at(toMin('21:30'), () => { const D2 = computeDay(dayKey()); const left = D2.remainingPlan.p; if (left > 25) notify(`Te quedan ${R(left)} g de proteína`, 'Prioriza la proteína de la cena.', 'prot'); });
-  at(bedMin() - 30, () => notify('🌙 Desconecta', `A dormir a las ${S.settings.bed}. Mañana, ${S.settings.wake}.`, 'bed'));
+async function pushOn(){
+  if (!pushSupported()) throw new Error('navegador sin avisos');
+  if (await Notification.requestPermission() !== 'granted') throw new Error('sin permiso');
+  const reg = await navigator.serviceWorker.ready;
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
+  const r = await postJSON('/subscribe', {endpoint:sub.endpoint});
+  if (!r.ok) throw new Error('el servidor respondió ' + r.status);
+  setPushState({endpoint:sub.endpoint, hash:'', at:0});
+  await syncSchedule(true);
+}
+async function pushOff(){
+  const ps = pushState();
+  try{ const reg = await navigator.serviceWorker.ready, sub = await reg.pushManager.getSubscription(); if (sub) await sub.unsubscribe(); if (ps) await postJSON('/unsubscribe', {endpoint:ps.endpoint}); }catch(_){}
+  setPushState(null);
+}
+let syncTimer = null;
+function queueSync(){ clearTimeout(syncTimer); syncTimer = setTimeout(() => syncSchedule(false), 2500); }
+async function syncSchedule(force, extra = []){
+  const ps = pushState(); if (!ps) return false;
+  const items = buildNotifications().concat(extra), h = strHash(JSON.stringify(items));
+  if (!force && h === ps.hash && Date.now() - ps.at < 6*3600e3) return true;
+  try{
+    let r = await postJSON('/schedule', {endpoint:ps.endpoint, items});
+    if (r.status === 404){ await postJSON('/subscribe', {endpoint:ps.endpoint}); r = await postJSON('/schedule', {endpoint:ps.endpoint, items}); }
+    if (!r.ok) return false;
+    setPushState(Object.assign(ps, {hash:h, at:Date.now()}));
+    if (TAB === 'ajustes' && !document.querySelector('.sheet')) renderAjustes();
+    return true;
+  }catch(_){ return false; }
+}
+function epochAt(k, min){ const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d, 0, Math.round(min)).getTime(); }
+const lowerName = id => /^[A-ZÁÉÍÓÚ]{2,}/.test(FOODS[id].n) ? FOODS[id].n : FOODS[id].n.toLowerCase();
+function cookList(items){
+  return items.filter(it => it.g > 0 && FOODS[it.id].g !== 'fruta' && FOODS[it.id].g !== 'liq')
+    .map(it => FOODS[it.id].u ? amount(it.id, it.g) : `${amount(it.id, it.g)} de ${lowerName(it.id)}`).join(', ');
+}
+function weeklySummaryText(){
+  const st = adherenceStats(), w = weeklyAvgs().filter(x => x.n >= 3), parts = [];
+  if (st.days) parts.push(`Comidas del plan: ${st.pct} %. Días con tu proteína: ${st.protDays}/${st.days}.`);
+  if (w.length){ const last = w[w.length-1], prev = w[w.length-2]; parts.push(`Peso medio: ${last.avg.toFixed(1).replace('.',',')} kg` + (prev ? ` (${last.avg-prev.avg>=0?'+':''}${(last.avg-prev.avg).toFixed(2).replace('.',',')} kg)` : '') + '.'); }
+  else parts.push('Esta semana apenas hay pesadas: pésate por las mañanas.');
+  parts.push('Toca para ver los detalles.');
+  return parts.join(' ');
+}
+function buildNotifications(){
+  const av = S.settings.avisos, out = [], now = Date.now(), today = dayKey();
+  const lastWaist = Object.keys(S.waist).sort().pop();
+  const waistDue = lastWaist ? addDays(lastWaist, 14) : today;
+  let waistDone = false;
+  for (let d = 0; d < 8; d++){
+    const k = addDays(today, d), existed = !!S.days[k];
+    const D = computeDay(k), day = S.days[k];
+    if (!existed) delete S.days[k]; // no guardar días futuros vacíos
+    const wake = D.sch.wake, wd = keyToDate(k).getDay();
+    let breakfastMerged = false;
+    if (av.buenosdias && !(existed && day.wake) && S.weights[k] == null){
+      const des = D.meals.desayuno;
+      let body = '¿Peso de hoy? Pésate antes de desayunar, después del baño.';
+      if (av.comidas && des.status === 'pending' && Math.abs(des.t - 30 - (wake + 5)) <= 20){
+        body += ` Y ve preparando el desayuno (${fmt(des.t)}): ${cookList(des.items)}.`; breakfastMerged = true;
+      }
+      out.push({nid:`${k}:buenosdias`, at:epochAt(k, wake + 5), title:'☀️ Buenos días', body, tag:'buenosdias', url:'#progreso'});
+    }
+    if (av.comidas) for (const m of D.sch.order){
+      const M = D.meals[m];
+      if (M.status !== 'pending' || M.merged || (m === 'desayuno' && breakfastMerged)) continue;
+      if (m === 'merienda') out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t), title:'🥤 Hora del batido', body:M.items.map(it => `${amount(it.id, it.g)} de ${FOODS[it.id].n.toLowerCase()}`).join(', ') + '.', tag:'comida', url:'#hoy'});
+      else out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t - 30), title:`🍳 ${MEAL_NAME[m]} a las ${fmt(M.t)}`,
+        body:`Iría bien ir empezando a cocinar: ${cookList(M.items)}.${M.notes.length ? ' Lleva ajustes por lo de hoy.' : ''}`, tag:'comida', url:'#hoy'});
+    }
+    if (av.resumen && wd === 0) out.push({nid:`${k}:resumen`, at:epochAt(k, 11*60), title:'📊 Tu semana', body:weeklySummaryText(), tag:'resumen', url:'#progreso'});
+    const falta = Object.keys(S.pantry).filter(id => S.pantry[id] === 'falta' && FOODS[id]);
+    if (av.compra && wd === 6 && falta.length) out.push({nid:`${k}:compra`, at:epochAt(k, 10*60), title:'🛒 Toca hacer la compra',
+      body:`Te falta${falta.length===1?'':'n'} ${falta.length} cosa${falta.length===1?'':'s'}: ${falta.slice(0,5).map(id => FOODS[id].n.toLowerCase()).join(', ')}${falta.length>5?'…':''}.`, tag:'compra', url:'#compra'});
+    if (av.cintura && !waistDone && k >= waistDue && epochAt(k, wake + 15) > now + 60e3){ waistDone = true;
+      out.push({nid:`${k}:cintura`, at:epochAt(k, wake + 15), title:'📏 Toca medir la cintura', body:'A la altura del ombligo, relajado y al final de soltar el aire. Apúntalo en Progreso.', tag:'cintura', url:'#progreso'}); }
+  }
+  return out.filter(n => n.at > now + 30e3).sort((a,b) => a.at - b.at);
 }
 
 /* ===================== Eventos globales ===================== */
-document.querySelector('nav.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (!b) return; TAB = b.dataset.tab; window.scrollTo(0,0); render(); });
+document.querySelector('nav.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (!b) return; TAB = b.dataset.tab; history.replaceState(null, '', '#' + TAB); window.scrollTo(0,0); render(); });
 app.addEventListener('click', async e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const a = b.dataset.act, m = b.dataset.m;
@@ -1152,17 +1245,20 @@ app.addEventListener('click', async e => {
   else if (a === 'savekey'){ const v = document.getElementById('aikey').value.trim(); if (!v || v.startsWith('•')) return toast('Pega tu API key'); if (!v.startsWith('sk-ant-')) return toast('Eso no parece una key de Anthropic'); try{ localStorage.setItem(AI_KEY, v); }catch(_){} render(); toast('Key guardada en este móvil'); }
   else if (a === 'delkey'){ try{ localStorage.removeItem(AI_KEY); }catch(_){} render(); toast('Key borrada'); }
   else if (a === 'kcaladj'){ S.settings.kcal = (+S.settings.kcal || 2500) + (+b.dataset.v); save(); render(); toast(`Objetivo: ${S.settings.kcal} kcal. El plan se ha recalculado.`); }
-  else if (a === 'notif'){
-    if (!('Notification' in window)) return toast('Este navegador no permite avisos');
-    const p = await Notification.requestPermission(); S.settings.notif = p === 'granted'; save(); render();
-    if (p === 'granted') notify('🔔 Recordatorios activados', 'Te avisaré de cada comida.', 'test'); else toast('Permiso denegado');
-  }
+  else if (a === 'pushon'){ b.disabled = true; try{ await pushOn(); toast('Avisos activados en este móvil'); }catch(err){ toast('No se pudieron activar: ' + (err.message || err)); } render(); }
+  else if (a === 'pushoff'){ await pushOff(); render(); toast('Avisos desactivados'); }
+  else if (a === 'pushtest'){ const ok = await syncSchedule(true, [{nid:'prueba-' + Date.now(), at:Date.now() + 60e3, title:'🔔 Aviso de prueba', body:'Así te llegarán los avisos, aunque la app esté cerrada. Ciérrala y espera 1–2 minutos.', tag:'prueba', url:'#ajustes'}]); toast(ok ? 'Llegará en 1–2 minutos. Puedes cerrar la app.' : 'No se pudo contactar con el servidor'); }
+  else if (a === 'aviso'){ const key = b.dataset.k; S.settings.avisos[key] = !S.settings.avisos[key]; save(); render(); }
   else if (a === 'export'){ const blob = new Blob([JSON.stringify(S, null, 1)], {type:'application/json'}); const url = URL.createObjectURL(blob); const l = document.createElement('a'); l.href = url; l.download = 'dieta-' + dayKey() + '.json'; l.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000); }
 });
 app.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role=button]')){ e.preventDefault(); e.target.click(); } });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
 setInterval(() => { if (!document.hidden && TAB === 'hoy' && !document.querySelector('.sheet')) render(); }, 60000);
 
+// los avisos abren la app en la pestaña que toca (#hoy, #progreso, #compra…)
+function tabFromHash(){ const h = location.hash.slice(1); if (['hoy','compra','progreso','ajustes'].includes(h)) TAB = h; }
+window.addEventListener('hashchange', () => { tabFromHash(); render(); });
+tabFromHash();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
 render();
 </script>

@@ -1,6 +1,7 @@
-// Service worker: funciona sin conexión y muestra las notificaciones.
-const CACHE = 'dieta-v2';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
+// Service worker: funciona sin conexión y muestra los avisos push.
+const CACHE = 'dieta-v3';
+const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './badge-96.png'];
+const PUSH_API = 'https://dieta-avisos.dieta-avisos.workers.dev';
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -16,15 +17,30 @@ self.addEventListener('fetch', e => {
       .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
   );
 });
+
+// El servidor manda un push vacío cuando toca un aviso; aquí se recogen y se muestran.
+self.addEventListener('push', e => {
+  e.waitUntil((async () => {
+    let items = [];
+    try {
+      const sub = await self.registration.pushManager.getSubscription();
+      const r = await fetch(PUSH_API + '/inbox', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({endpoint: sub && sub.endpoint})});
+      items = (await r.json()).items || [];
+    } catch (_) {}
+    // Android exige mostrar algo en cada push
+    if (!items.length) items = [{title: 'Dieta', body: 'Tienes un aviso. Abre la app para verlo.', tag: 'dieta', url: '#hoy'}];
+    await Promise.all(items.map(n => self.registration.showNotification(n.title, {
+      body: n.body, tag: n.tag || n.nid, icon: 'icon-192.png', badge: 'badge-96.png', data: {url: n.url || ''},
+    })));
+  })());
+});
+
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  e.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(cs => {
+  const target = new URL('./index.html' + ((e.notification.data && e.notification.data.url) || ''), self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(async cs => {
     const c = cs.find(x => 'focus' in x);
-    return c ? c.focus() : self.clients.openWindow('./index.html');
+    if (c) { try { await c.navigate(target); } catch (_) {} return c.focus(); }
+    return self.clients.openWindow(target);
   }));
-});
-// Fase 2: aquí llegarán los avisos push del servidor.
-self.addEventListener('push', e => {
-  let d = {}; try { d = e.data.json(); } catch (_) { d = {title: 'Dieta', body: e.data ? e.data.text() : ''}; }
-  e.waitUntil(self.registration.showNotification(d.title || 'Dieta', {body: d.body || '', tag: d.tag, icon: 'icon-192.png', badge: 'icon-192.png'}));
 });
