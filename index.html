@@ -148,7 +148,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 3;
+const VERSION = 4;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -244,6 +244,7 @@ function load(){
   try{ S = JSON.parse(localStorage.getItem(STORE)) || {}; }catch(e){ S = {}; }
   S = Object.assign(structuredClone(DEFAULTS), S);
   S.settings = Object.assign(structuredClone(DEFAULTS.settings), S.settings);
+  Object.assign(FOODS, S.foods || {}); // productos de Mercadona que ya has usado
 }
 function save(){ try{ localStorage.setItem(STORE, JSON.stringify(S)); }catch(e){} }
 load();
@@ -271,6 +272,74 @@ function equiv(from, g, to){
   if (!key || FOODS[to][key] <= 0 || FOODS[from][key] <= 0) return roundG(to, g);
   return roundG(to, FOODS[from][key]*g/FOODS[to][key]);
 }
+/* ===================== Base de alimentos de Mercadona ===================== */
+// alimentos.json se descarga la primera vez que hace falta (buscador, intercambios, escáner, IA) y el service
+// worker la deja guardada. Los productos que llegas a usar se copian a S.foods: así la app los tiene siempre,
+// aunque la base no esté cargada, y la pantalla Hoy nunca la necesita.
+const DB_GROUP = {prot:'prot', carb:'carb', grasa:'grasa', fruta:'fruta', verd:'verd', lacteo:'lacteo', bebida:'liq', snack:'snack', plato:'plato', salsa:'salsa', otro:'otro'};
+Object.assign(GROUP_KEY, {lacteo:'p', snack:'k', plato:'k', salsa:null, otro:'k'});
+Object.assign(GROUP_NAME, {lacteo:'Lácteo', snack:'Capricho', plato:'Plato', salsa:'Salsa', otro:'Otro'});
+const MDB_FECHA = '19/10/2026';
+let MDB = null, mdbLoading = null;
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const STOP = new Set('de del la el los las un una unos unas y con sin al a en por para que me mi he ha hemos comido comi tomado tomo cena comida almuerzo desayuno plato poco mitad gramos media medio trozo racion menu dia hoy algo poquito'.split(' '));
+function mdbFood(r){ // fila compacta de alimentos.json -> forma de FOODS
+  const F = {n:r.n, g: r.l && r.g === 'lacteo' ? 'liq' : (DB_GROUP[r.g] || 'otro'), k:r.k, p:r.p, c:r.h, f:r.f, sec:'Mercadona · ' + r.c, mid:true, q:r.q};
+  if (r.u) Object.assign(F, {u:r.u, un:['ud.', 'uds.']});
+  if (r.l) F.ml = 1;
+  if (r.e) F.ean = r.e;
+  if (r.x) F.tal = 1; // conserva en aceite: valores sin escurrir
+  return F;
+}
+async function loadMDB(){
+  if (MDB) return MDB;
+  if (!mdbLoading) mdbLoading = fetch('alimentos.json').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => {
+      const list = d.a.map(r => ({id:r.i, r, t:' ' + norm(r.n + ' ' + r.c).replace(/[^a-z0-9ñ]+/g, ' ')}));
+      const byEan = {}, byId = {};
+      list.forEach(x => { byId[x.id] = x; if (x.r.e) byEan[x.r.e] = x; });
+      return (MDB = {fecha:d.fecha, list, byEan, byId, n:list.length});
+    })
+    .catch(e => { mdbLoading = null; throw e; });
+  return mdbLoading;
+}
+function useMDB(id){ if (!FOODS[id] && MDB && MDB.byId[id]) FOODS[id] = mdbFood(MDB.byId[id].r); return FOODS[id]; }
+function keepFood(id){ // un producto que se usa: se guarda y sube en «recientes»
+  const F = FOODS[id]; if (!F) return;
+  if (F.mid){ S.foods = S.foods || {}; S.foods[id] = F; }
+  S.recent = S.recent || {}; S.recent[id] = Date.now();
+}
+// Búsqueda local: palabras de la consulta como prefijo de las palabras del producto.
+// Sin consulta, ordena por recientes y confianza (útil para los intercambios).
+function searchFoods(q, {group = null, limit = 20, base = true, mercadona = true} = {}){
+  const words = norm(q || '').split(/[^a-z0-9ñ]+/).filter(w => w.length > 1 && !STOP.has(w)).map(w => w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w);
+  const rec = S.recent || {}, qual = {a:2, m:1, b:0}, out = [];
+  const score = t => words.reduce((s, w) => s + (t.includes(' ' + w) ? 1 : 0), 0);
+  if (base) for (const [id, F] of Object.entries(FOODS)){
+    if (F.mid || !(F.sec || id === 'agua') || (group && F.g !== group)) continue;
+    const s = words.length ? score(' ' + norm(F.n).replace(/[^a-z0-9ñ]+/g, ' ')) : 0;
+    if (words.length && !s) continue;
+    out.push({id, s: s + 0.5, r: rec[id] || 0, q: 2, l: F.n.length});
+  }
+  if (mercadona && MDB) for (const x of MDB.list){
+    const g = x.r.l && x.r.g === 'lacteo' ? 'liq' : (DB_GROUP[x.r.g] || 'otro');
+    if (group && g !== group) continue;
+    const s = words.length ? score(x.t) : 0;
+    if (words.length && !s) continue;
+    out.push({id:x.id, s, r: rec[x.id] || 0, q: qual[x.r.q] ?? 0, l: x.r.n.length});
+  }
+  // más coincidencias > usado hace poco > dato más fiable > nombre más corto (más genérico)
+  out.sort((a, b) => b.s - a.s || b.r - a.r || b.q - a.q || a.l - b.l);
+  return out.slice(0, limit).map(o => o.id);
+}
+// Para la IA: cada parte de la descripción («…, … y … con …») aporta sus propios candidatos.
+function candidatesFor(text, limit = 20){
+  const parts = norm(text).split(/[,;:.\n+]| y | con | mas | ademas | luego /).map(s => s.trim()).filter(Boolean);
+  const out = [];
+  for (const p of parts) for (const id of searchFoods(p, {limit:6, base:false})) if (!out.includes(id)) out.push(id);
+  return out.slice(0, limit);
+}
+
 function toast(msg, undo){
   document.querySelectorAll('.toast').forEach(t=>t.remove());
   const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = esc(msg) + (undo ? ' <button>Deshacer</button>' : '');
@@ -620,6 +689,7 @@ function logMeal(m, status, extra = {}){
   const items = D.meals[m].items.map(x => ({id:x.id, g:x.g}));
   day.meals[m] = Object.assign({status, at: extra.at ?? nowMin(), items}, extra);
   if (status === 'skipped') { day.meals[m].items = []; delete day.meals[m].at; }
+  day.meals[m].items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid) keepFood(it.id); });
   // marcar el batido como tomado si iba con la cena
   if (m === 'cena' && D.meals.merienda && D.meals.merienda.merged && status !== 'skipped'){
     day.meals.merienda = {status:'done', at: day.meals[m].at, items: []};
@@ -628,14 +698,17 @@ function logMeal(m, status, extra = {}){
   toast(status === 'skipped' ? MEAL_NAME[m] + ' saltada: recoloco el día' : MEAL_NAME[m] + ' registrada', () => { if (prev) day.meals[m] = prev; else delete day.meals[m]; save(); render(); });
 }
 
+let sheetCleanup = null; // p. ej. apagar la cámara al cerrar o cambiar de hoja
+function runCleanup(){ if (sheetCleanup){ const f = sheetCleanup; sheetCleanup = null; try{ f(); }catch(_){} } }
 function sheet(html, onMount){
+  runCleanup();
   const root = document.getElementById('sheet-root');
   root.innerHTML = `<div class="sheet-bg"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div></div>`;
   const bg = root.firstChild;
   bg.addEventListener('click', e => { if (e.target === bg) closeSheet(); });
   if (onMount) onMount(bg.querySelector('.sheet'));
 }
-function closeSheet(){ document.getElementById('sheet-root').innerHTML = ''; }
+function closeSheet(){ runCleanup(); document.getElementById('sheet-root').innerHTML = ''; }
 const timeInput = (id, val) => `<input type="time" id="${id}" value="${fmt(val)}">`;
 
 function sheetMore(m){
@@ -645,6 +718,7 @@ function sheetMore(m){
     <button class="opt sel" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
     <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
     <button class="opt" data-x="edit"><span>✏️ Con cambios</span><span class="d">ajusta gramos o alimentos</span></button>
+    <button class="opt" data-x="scan"><span>📷 Escanear lo que he comido</span><span class="d">código de barras</span></button>
     <button class="opt" data-x="other"><span>🍽️ Comí otra cosa / fuera</span><span class="d">ligero, normal, copioso…</span></button>
     <button class="opt" data-x="skip"><span>⏭️ Me la salto</span><span class="d">se recoloca el resto</span></button>
   </div>
@@ -656,15 +730,23 @@ function sheetMore(m){
       if (a === 'at') el.querySelector('#atbox').hidden = false;
       if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
       if (a === 'edit') sheetEdit(m);
+      if (a === 'scan') sheetScan(id => sheetEdit(m, M.items.map(x => ({id:x.id, g:x.g})).concat({id, g:FOODS[id].u || 100})), 'Se añade a lo previsto; quita lo que no hayas comido.');
       if (a === 'other') sheetOther(m);
       if (a === 'skip'){ closeSheet(); logMeal(m, 'skipped'); }
     });
   });
 }
 
-function sheetEdit(m){
+// Lista de resultados del buscador (alimentos del plan + Mercadona). onPick(id) al tocar uno.
+function foodResults(el, sel, ids, extraHtml = () => ''){
+  el.querySelector(sel).innerHTML = ids.length ? ids.map(id => { const F = useMDB(id) || FOODS[id];
+    return `<button class="opt" data-pick="${id}"><span>${esc(F.n)}${F.q === 'b' ? ' <span class="muted" style="font-size:12px">(dato aproximado)</span>' : ''}${F.tal ? ' <span class="muted" style="font-size:12px">(sin escurrir)</span>' : ''}</span><span class="d num">${extraHtml(id, F) || `${R(F.k)} kcal · ${R(F.p)} g P`}</span></button>`; }).join('')
+    : `<div class="empty">Sin resultados</div>`;
+}
+function sheetEdit(m, init = null){
   const k = dayKey(), D = computeDay(k);
-  let items = D.meals[m].items.map(x => ({id:x.id, g:x.g}));
+  let items = init || D.meals[m].items.map(x => ({id:x.id, g:x.g}));
+  const sum = el => { const t = sumItems(items); el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`; };
   const draw = el => {
     el.querySelector('#ed').innerHTML = items.map((it,i)=>{
       const F = FOODS[it.id], val = F.u ? Math.round(it.g/F.u) : R(it.g);
@@ -672,25 +754,70 @@ function sheetEdit(m){
         <input type="number" inputmode="decimal" min="0" step="${F.u?1:5}" value="${val}" data-i="${i}" style="width:92px">
         <span class="muted" style="width:52px;font-size:13px">${F.u?F.un[1]:F.ml?'ml':'g'}</span>
         <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
-    const t = sumItems(items);
-    el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`;
+    sum(el);
   };
   sheet(`<h2>${MEAL_NAME[m]} con cambios</h2><div class="sub">Pon lo que has comido de verdad.</div>
     <div id="ed"></div>
     <label class="f">Añadir alimento</label>
-    <div class="row"><select id="addf">${Object.entries(FOODS).filter(([id,F])=>F.sec).map(([id,F])=>`<option value="${id}">${esc(F.n)}</option>`).join('')}</select><button class="btn sm" id="addb">Añadir</button></div>
+    <div class="row"><input id="addq" type="search" placeholder="Busca: pavo, yogur proteínas, tortitas…" autocomplete="off"><button class="btn sm" data-x="scan" aria-label="Escanear código">📷</button></div>
+    <div id="addres" class="stack" style="margin-top:8px"></div>
     <div class="muted num" id="edsum" style="margin:14px 0 8px"></div>
     <label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), D.meals[m].t))}
     <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
     draw(el);
-    el.addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id]; const v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = sumItems(items); el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`; });
+    const showRes = () => { const q = el.querySelector('#addq').value.trim(); if (!q){ el.querySelector('#addres').innerHTML = ''; return; } foodResults(el, '#addres', searchFoods(q, {limit:12})); };
+    loadMDB().then(showRes).catch(() => {});
+    el.querySelector('#addq').addEventListener('input', showRes);
+    el.addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id]; const v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; sum(el); });
     el.addEventListener('click', e => {
-      if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); draw(el); }
-      if (e.target.id === 'addb'){ const id = el.querySelector('#addf').value; items.push({id, g: FOODS[id].u || 100}); draw(el); }
+      if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); draw(el); return; }
+      const p = e.target.closest('[data-pick]');
+      if (p){ const id = p.dataset.pick; useMDB(id); items.push({id, g: FOODS[id].u || 100}); el.querySelector('#addq').value = ''; el.querySelector('#addres').innerHTML = ''; draw(el); return; }
       const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100})));
       if (x.dataset.x === 'cancel') closeSheet();
       if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0)}); }
     });
+  });
+}
+
+// Escáner de códigos de barras (BarcodeDetector de Chrome en Android). Busca el EAN en la base, sin IA.
+function sheetScan(onFound, hint = ''){
+  sheet(`<h2>📷 Escanear código de barras</h2><div class="sub">Apunta al código del envase. ${esc(hint)}</div>
+    <video id="cam" playsinline muted style="width:100%;border-radius:14px;background:#000;aspect-ratio:4/3;object-fit:cover"></video>
+    <div id="scst" class="muted" style="font-size:13px;margin-top:8px">Abriendo la cámara…</div>
+    <label class="f">O escribe el número del código</label>
+    <div class="row"><input id="eanin" inputmode="numeric" placeholder="8480000…" autocomplete="off"><button class="btn sm" data-x="ean">Buscar</button></div>
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cerrar</button></div>`, async el => {
+    let stream = null, stop = false;
+    const off = () => { stop = true; if (stream) stream.getTracks().forEach(t => t.stop()); };
+    sheetCleanup = off;
+    const st = txt => { const s = el.querySelector('#scst'); if (s) s.textContent = txt; };
+    const found = async code => {
+      try{ await loadMDB(); }catch(_){ st('No se ha podido cargar la base de alimentos (¿sin conexión?).'); return false; }
+      const x = MDB.byEan[code] || MDB.byEan[code.padStart(13, '0')] || MDB.byEan[code.replace(/^0+/, '')];
+      if (!x){ st(`El código ${code} no está en la base. Puedes contárselo a la IA o hacerle una foto a la etiqueta.`); return false; }
+      off(); useMDB(x.id); keepFood(x.id); save(); onFound(x.id); return true;
+    };
+    el.addEventListener('click', e => {
+      const b = e.target.closest('[data-x]'); if (!b) return;
+      if (b.dataset.x === 'cancel') closeSheet();
+      if (b.dataset.x === 'ean'){ const v = el.querySelector('#eanin').value.replace(/\D/g, ''); if (v) found(v); }
+    });
+    if (!('BarcodeDetector' in window) || !navigator.mediaDevices){ st('Este navegador no lee códigos de barras: escribe el número que hay debajo del código.'); el.querySelector('#cam').hidden = true; return; }
+    try{
+      const det = new BarcodeDetector({formats:['ean_13', 'ean_8', 'upc_a', 'upc_e']});
+      stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+      if (stop){ off(); return; }
+      const v = el.querySelector('#cam'); v.srcObject = stream; await v.play();
+      st('Buscando un código…');
+      let last = '';
+      while (!stop){
+        const codes = await det.detect(v).catch(() => []);
+        if (codes.length && codes[0].rawValue !== last){ last = codes[0].rawValue; if (await found(last)) break; }
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }catch(err){ st('No se pudo abrir la cámara: ' + (err.message || err) + '. Escribe el número del código.'); }
   });
 }
 
@@ -729,13 +856,25 @@ function sheetSwap(m, i){
   sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${GROUP_NAME[grp].toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
     <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = S.pantry[a]==='falta';
       return `<button class="opt ${a===it.id?'sel':''}" data-a="${a}" data-g="${g}"><span>${esc(FOODS[a].n)}${miss?' <span style="color:var(--coral);font-size:12px">(no hay)</span>':''}</span><span class="d num">${amount(a,g)}</span></button>`; }).join('')}</div>
+    <h3 class="sec">Más opciones de Mercadona</h3>
+    <input id="swq" type="search" placeholder="Busca o elige: pavo, sepia, tofu…" autocomplete="off">
+    <div id="swres" class="stack" style="margin-top:8px"><div class="empty">Cargando productos…</div></div>
     <div class="evactions"><button class="btn danger" data-x="falta">No tengo ${esc(FOODS[it.id].n.toLowerCase())}</button></div>`, el => {
+    const drawMdb = () => {
+      // sin búsqueda: primero lo que se parece al alimento original (variantes reales del mismo producto)
+      const q = el.querySelector('#swq').value.trim() || FOODS[orig].n;
+      const ids = searchFoods(q, {group:grp, limit:20, base:false}).filter(id => { const F = useMDB(id); return F && F.q !== 'b' && F[GROUP_KEY[grp] || 'k'] > 0; });
+      foodResults(el, '#swres', ids, id => amount(id, equiv(orig, origG, id)));
+    };
+    loadMDB().then(drawMdb).catch(() => { el.querySelector('#swres').innerHTML = '<div class="empty">Sin conexión: la base de Mercadona se descarga la primera vez que la usas.</div>'; });
+    el.querySelector('#swq').addEventListener('input', () => { if (MDB) drawMdb(); });
     el.addEventListener('click', e => {
       const day = getDay(k);
-      const a = e.target.closest('[data-a]');
+      const pick = e.target.closest('[data-pick]');
+      const a = e.target.closest('[data-a]') || (pick && {dataset:{a:pick.dataset.pick}});
       if (a){
         day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
-        if (a.dataset.a === orig) delete day.swaps[m][i]; else day.swaps[m][i] = {id:a.dataset.a};
+        if (a.dataset.a === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:a.dataset.a}; keepFood(a.dataset.a); }
         save(); closeSheet(); render(); return;
       }
       const x = e.target.closest('[data-x]');
@@ -799,7 +938,8 @@ async function loadSDK(){
   return _Anthropic;
 }
 function aiSystem(){
-  const db = Object.entries(FOODS).filter(([id,F]) => F.sec).map(([id,F]) =>
+  // Solo los alimentos base: el texto es siempre igual (la lista de Mercadona va en cada consulta, recortada).
+  const db = Object.entries(FOODS).filter(([id,F]) => F.sec && !F.mid).map(([id,F]) =>
     `${id}: ${F.n} — por 100 ${F.ml?'ml':'g'}: ${F.k} kcal, ${F.p} g prot, ${F.c} g hidratos, ${F.f} g grasa${F.u ? ` (1 unidad ≈ ${F.u} g)` : ''}`).join('\n');
   return `Eres el asistente de nutrición de una app de dieta personal. El usuario cuenta (a veces con una foto) lo que ha comido en una comida concreta. Conviertes eso en un registro fiable, porque la app recalcula con él el resto del día: si sobrestimas o infraestimas, las siguientes comidas salen mal ajustadas.
 
@@ -809,14 +949,15 @@ ${db}
 Cómo rellenar la respuesta:
 - accion: "hecha" si comió lo del plan tal cual; "cambios" si es el plan con modificaciones; "otra" si comió algo distinto; "saltada" si no comió.
 - items: alimentos de la base de datos con sus gramos. En "hecha" y "cambios" pon la lista completa de lo que comió de verdad, no solo lo que cambia. El arroz y la pasta de la base de datos están en crudo: si te dan cantidades cocinadas, conviértelas (1 g crudo ≈ 2,5–3 g cocido). Huevos y fruta en gramos (usa el peso por unidad).
+- productos_mercadona: en cada consulta la app añade productos reales de Mercadona (donde compra el usuario) cuyo nombre se parece a lo que cuenta, con los macros de su etiqueta. Es una preselección automática por palabras, así que puede traer productos que no tienen nada que ver: ignóralos. Si lo que comió es claramente uno de ellos, pon su id en items con los gramos, porque es más exacto que estimar. Si no coincide ninguno, usa la base de datos de arriba o extras. "sin_escurrir" quiere decir que sus valores incluyen el aceite de la lata.
 - extras: lo que no esté en la base de datos, con gramos y macros totales de esa cantidad. Usa raciones típicas de España si no se dicen. En comidas de restaurante o fritos cuenta el aceite que no se ve.
 - hora: "HH:MM" si la menciona; si no, cadena vacía.
 - confianza: "baja" si has tenido que suponer bastante.
 - resumen: una frase corta en español con lo registrado.
 - consejo: como mucho una frase útil para el resto del día, o cadena vacía. No sermonees.`;
 }
-function aiSchema(){
-  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec);
+function aiSchema(extraIds = []){
+  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec && !FOODS[id].mid).concat(extraIds);
   return {
     type:'object', additionalProperties:false,
     required:['accion','items','extras','hora','confianza','resumen','consejo'],
@@ -834,13 +975,20 @@ async function aiAnalyze({m, items, text, photo, at}){
   const Anthropic = await loadSDK();
   const client = new Anthropic({apiKey: aiKey(), dangerouslyAllowBrowser: true});
   const model = AI_MODELS[S.settings.aiModel] ? S.settings.aiModel : 'claude-opus-5-5';
+  // Preselección local: los ~20 productos de Mercadona que más se parecen a lo que cuenta (y los que ya usa)
+  let cand = [];
+  if (text){ try{ await loadMDB(); cand = candidatesFor(text); }catch(_){} }
+  items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid && !cand.includes(it.id)) cand.push(it.id); });
+  const prods = cand.map(id => { const F = useMDB(id) || FOODS[id]; const o = {id, nombre:F.n, por_100:{kcal:F.k, p:F.p, c:F.c, f:F.f}};
+    if (F.ml) o.liquido = true; if (F.u) o.unidad_g = F.u; if (F.tal) o.sin_escurrir = true; return o; });
   const ctx = {comida: MEAL_NAME[m], hora_actual: fmt(nowMin()), hora_elegida_en_la_app: fmt(at),
-    plan_de_esta_comida: items.map(it => ({id: it.id, alimento: FOODS[it.id].n, g: R(it.g)}))};
+    plan_de_esta_comida: items.map(it => ({id: it.id, alimento: FOODS[it.id].n, g: R(it.g)})),
+    productos_mercadona: prods};
   const content = [];
   if (photo) content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}});
   content.push({type:'text', text:`Contexto de la app:\n${JSON.stringify(ctx)}\n\nLo que cuenta el usuario:\n${text || '(sin texto: usa la foto)'}`});
   const params = {model, max_tokens:8000, system:aiSystem(), messages:[{role:'user', content}],
-    output_config:{effort:'low', format:{type:'json_schema', schema:aiSchema()}}};
+    output_config:{effort:'low', format:{type:'json_schema', schema:aiSchema(cand)}}};
   let res;
   if (AI_MODELS[model].fallback) res = await client.beta.messages.create(Object.assign(params, {betas:['server-side-fallback-2026-07-01'], fallbacks:'default'}));
   else res = await client.messages.create(params);
@@ -1092,6 +1240,12 @@ function renderAjustes(){
   <div class="card">
     <label class="f" style="margin-top:0">Tema</label>
     <div class="seg">${[['auto','Auto'],['dark','Oscuro'],['light','Claro']].map(([v,l])=>`<button data-act="theme" data-v="${v}" class="${s.theme===v?'on':''}">${l}</button>`).join('')}</div>
+  </div>
+  <div class="card">
+    <label class="f" style="margin-top:0">🛒 Base de alimentos de Mercadona</label>
+    <div class="muted" style="font-size:13px">${MDB ? MDB.n.toLocaleString('es-ES') + ' productos' : 'Unos 2.400 productos'} (almacén de Sevilla, que sirve a Huelva), datos del ${MDB_FECHA}. Se descarga la primera vez que buscas o escaneas y queda guardada en el móvil.
+    Has usado ${Object.keys(S.foods || {}).length} producto${Object.keys(S.foods || {}).length === 1 ? '' : 's'}.<br><br>
+    Datos nutricionales: <a href="https://world.openfoodfacts.org" style="color:inherit">Open Food Facts</a> (licencia ODbL), BEDCA (AESAN) y USDA FoodData Central. Catálogo: tienda.mercadona.es. Si un dato no cuadra con la etiqueta, manda la etiqueta.</div>
   </div>
   <div class="card">
     <label class="f" style="margin-top:0">Copia de seguridad</label>
