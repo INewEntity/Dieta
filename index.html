@@ -1,0 +1,951 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101310">
+<meta name="description" content="Tu dieta con ajustes inteligentes a lo largo del día.">
+<title>Dieta</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{
+  --bg:#101310; --card:#191d19; --card2:#20251f; --line:#2b322a; --text:#eef2ea; --muted:#98a294;
+  --lime:#b8f040; --lime-ink:#b8f040; --on-lime:#142000; --amber:#f2b33d; --coral:#ff6f5e; --sky:#7cc4ff;
+  --radius:18px; --shadow:0 8px 30px rgba(0,0,0,.35); --toast-link:#3f6d00;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#f4f5ef; --card:#ffffff; --card2:#eef0e8; --line:#dfe3d7; --text:#151a14; --muted:#636d60;
+    --lime:#b8f040; --lime-ink:#4b7d00; --on-lime:#142000; --amber:#b87800; --coral:#d8432f; --sky:#1f78c4;
+    --shadow:0 6px 24px rgba(30,40,20,.10); --toast-link:#b8f040; color-scheme:light;
+  }
+}
+:root[data-theme="light"]{
+  --bg:#f4f5ef; --card:#ffffff; --card2:#eef0e8; --line:#dfe3d7; --text:#151a14; --muted:#636d60;
+  --lime:#b8f040; --lime-ink:#4b7d00; --on-lime:#142000; --amber:#b87800; --coral:#d8432f; --sky:#1f78c4;
+  --shadow:0 6px 24px rgba(30,40,20,.10); --toast-link:#b8f040; color-scheme:light;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:16px;line-height:1.4}
+body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+input,select{font:inherit;color:var(--text);background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px 12px;width:100%}
+input:focus,select:focus{outline:2px solid var(--lime);outline-offset:1px}
+.num{font-variant-numeric:tabular-nums}
+main{max-width:560px;margin:0 auto;padding:16px 16px 24px}
+header.top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 14px}
+header.top h1{font-size:22px;margin:0;letter-spacing:-.02em}
+header.top .sub{color:var(--muted);font-size:14px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:var(--card);border:1px solid var(--line);font-size:14px;font-weight:600}
+.chip.on{background:var(--lime);color:var(--on-lime);border-color:transparent}
+.chip.warn{border-color:var(--amber);color:var(--amber)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+.hero{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.hero .big{font-size:40px;font-weight:800;letter-spacing:-.03em;line-height:1}
+.hero .lbl{color:var(--muted);font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.hero .small{color:var(--muted);font-size:13px;margin-top:6px}
+.bar{height:8px;border-radius:99px;background:var(--card2);overflow:hidden;margin-top:10px}
+.bar>i{display:block;height:100%;background:var(--lime);border-radius:99px}
+.bar.k>i{background:var(--sky)}
+.macros{display:flex;gap:14px;color:var(--muted);font-size:13px;margin-top:12px;grid-column:1/-1}
+.tips{margin:0 0 12px;padding:0;list-style:none}
+.tips li{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--lime);border-radius:14px;padding:10px 12px;margin-bottom:8px;font-size:14px}
+.tips li.amber{border-left-color:var(--amber)}
+.tips li.coral{border-left-color:var(--coral)}
+.timeline{position:relative}
+.ev{position:relative;touch-action:pan-y;user-select:none}
+.ev .card{position:relative;z-index:1;transition:transform .15s ease;margin-bottom:10px}
+.ev.drag .card{transition:none}
+.ev .swipebg{position:absolute;inset:0 0 10px 0;border-radius:var(--radius);background:var(--lime);color:var(--on-lime);display:flex;align-items:center;padding-left:20px;font-weight:800;opacity:0}
+.evhead{display:flex;align-items:center;gap:10px}
+.evtime{font-size:22px;font-weight:800;letter-spacing:-.02em;min-width:66px}
+.evname{font-weight:700;font-size:17px;flex:1}
+.badge{font-size:12px;font-weight:700;padding:4px 9px;border-radius:99px;background:var(--card2);color:var(--muted);white-space:nowrap}
+.badge.done{background:var(--lime);color:var(--on-lime)}
+.badge.late{background:transparent;border:1px solid var(--amber);color:var(--amber)}
+.badge.skip{background:transparent;border:1px solid var(--coral);color:var(--coral)}
+.items{margin:10px 0 0;padding:0;list-style:none}
+.items li{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px dashed var(--line);font-size:15px}
+.items li:first-child{border-top:0}
+.items li button{text-align:left;flex:1;padding:0}
+.items .amt{color:var(--muted);white-space:nowrap}
+.items li.plus .amt,.items li.plus button{color:var(--lime-ink)}
+.items li.minus .amt{color:var(--amber)}
+.items li.miss button{color:var(--coral)}
+.items s{opacity:.55}
+.evnote{font-size:13px;color:var(--muted);margin-top:8px}
+.evnote b{color:var(--text)}
+.evactions{display:flex;gap:8px;margin-top:12px}
+.btn{flex:1;padding:12px 14px;border-radius:14px;background:var(--card2);border:1px solid var(--line);font-weight:700;text-align:center}
+.btn.pri{background:var(--lime);color:var(--on-lime);border-color:transparent}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--coral);border-color:var(--coral);background:transparent}
+.btn.sm{flex:0 0 auto;padding:9px 12px;font-size:14px}
+.ev.trainev .card{border-style:dashed}
+.ev.dim .card{opacity:.62}
+.ev.sleep .card{background:transparent}
+.macroline{font-size:12px;color:var(--muted);margin-top:6px}
+nav.tabs{position:fixed;left:0;right:0;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);border-top:1px solid var(--line);display:flex;justify-content:center;padding:8px 8px calc(8px + env(safe-area-inset-bottom));z-index:5}
+nav.tabs .in{display:flex;max-width:560px;width:100%}
+nav.tabs button{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;font-size:12px;font-weight:700;color:var(--muted);border-radius:12px}
+nav.tabs button .ic{font-size:20px;line-height:1}
+nav.tabs button[aria-current="page"]{color:var(--text);background:var(--card)}
+.sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10;display:flex;align-items:flex-end;justify-content:center;animation:fade .15s}
+.sheet{background:var(--card);width:100%;max-width:560px;max-height:88vh;overflow:auto;border-radius:22px 22px 0 0;padding:18px 16px calc(20px + env(safe-area-inset-bottom));box-shadow:var(--shadow);animation:up .18s ease}
+.sheet h2{margin:0 0 4px;font-size:20px}
+.sheet .sub{color:var(--muted);font-size:14px;margin-bottom:14px}
+.sheet .grab{width:40px;height:5px;border-radius:9px;background:var(--line);margin:0 auto 12px}
+.stack{display:flex;flex-direction:column;gap:8px}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{min-width:0}
+.opt{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;padding:13px 14px;border-radius:14px;background:var(--card2);border:1px solid var(--line)}
+.opt .d{color:var(--muted);font-size:13px}
+.opt.sel{border-color:var(--lime)}
+label.f{display:block;font-size:13px;color:var(--muted);font-weight:600;margin:10px 0 6px}
+.seg{display:flex;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:3px;gap:3px}
+.seg button{flex:1;padding:8px 6px;border-radius:9px;font-weight:700;font-size:14px;color:var(--muted)}
+.seg button.on{background:var(--lime);color:var(--on-lime)}
+.days{display:flex;gap:6px}
+.days button{flex:1;padding:10px 0;border-radius:10px;background:var(--card2);border:1px solid var(--line);font-weight:700}
+.days button.on{background:var(--lime);color:var(--on-lime);border-color:transparent}
+h3.sec{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:18px 2px 8px}
+.list .li{display:flex;align-items:center;gap:10px;padding:11px 12px;border-top:1px solid var(--line)}
+.list .li:first-child{border-top:0}
+.list .li .n{flex:1}
+.list .li .q{color:var(--muted);font-size:13px}
+.tog{padding:6px 10px;border-radius:99px;font-size:13px;font-weight:700;border:1px solid var(--line);background:var(--card2)}
+.tog.falta{border-color:var(--coral);color:var(--coral);background:transparent}
+.check{width:26px;height:26px;border-radius:8px;border:2px solid var(--line);display:grid;place-items:center;flex:0 0 auto}
+.check.on{background:var(--lime);border-color:transparent;color:var(--on-lime)}
+.empty{color:var(--muted);text-align:center;padding:18px 8px;font-size:14px}
+table.t{width:100%;border-collapse:collapse;font-size:14px}
+table.t td,table.t th{padding:8px 6px;border-top:1px solid var(--line);text-align:right}
+table.t th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase}
+table.t td:first-child,table.t th:first-child{text-align:left}
+.chart{width:100%;height:150px;display:block}
+.muted{color:var(--muted)}
+.toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:99px;font-weight:700;font-size:14px;z-index:20;box-shadow:var(--shadow);animation:up .2s}
+.toast button{color:var(--toast-link);font-weight:800;margin-left:10px}
+@keyframes up{from{transform:translateY(24px);opacity:0}}
+@keyframes fade{from{opacity:0}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"></main>
+<nav class="tabs" aria-label="Secciones"><div class="in">
+  <button data-tab="hoy"><span class="ic">🍽️</span>Hoy</button>
+  <button data-tab="compra"><span class="ic">🛒</span>Despensa</button>
+  <button data-tab="progreso"><span class="ic">📈</span>Progreso</button>
+  <button data-tab="ajustes"><span class="ic">⚙️</span>Ajustes</button>
+</div></nav>
+<div id="sheet-root"></div>
+<script>
+'use strict';
+const VERSION = 1;
+const STORE = 'dieta.v1';
+
+/* ===================== Alimentos (por 100 g o 100 ml) ===================== */
+const FOODS = {
+  huevo:{n:'Huevo',g:'prot',k:143,p:12.6,c:0.7,f:9.5,u:55,un:['huevo','huevos'],sec:'Huevos y lácteos'},
+  claras:{n:'Claras de huevo',g:'prot',k:48,p:10.5,c:0.7,f:0.2,sec:'Huevos y lácteos'},
+  pollo:{n:'Pechuga de pollo',g:'prot',k:110,p:23,c:0,f:1.5,sec:'Carne y pescado'},
+  pavo:{n:'Pechuga de pavo',g:'prot',k:105,p:23,c:0,f:1,sec:'Carne y pescado'},
+  ternera:{n:'Carne picada de vacuno',g:'prot',k:200,p:17,c:1.5,f:14,sec:'Carne y pescado'},
+  merluza:{n:'Merluza',g:'prot',k:80,p:17.5,c:0,f:1.2,sec:'Carne y pescado'},
+  salmon:{n:'Salmón',g:'prot',k:200,p:20,c:0,f:13,sec:'Carne y pescado'},
+  atun:{n:'Atún al natural (escurrido)',g:'prot',k:108,p:25,c:0,f:1,sec:'Conservas'},
+  sardinas:{n:'Sardinas en lata (escurridas)',g:'prot',k:210,p:24,c:0,f:12,sec:'Conservas'},
+  yogurp:{n:'Yogur alto en proteínas',g:'prot',k:60,p:10,c:4,f:0.2,u:120,un:['yogur','yogures'],sec:'Huevos y lácteos'},
+  quesob:{n:'Queso fresco batido 0 %',g:'prot',k:46,p:8,c:3.5,f:0.1,sec:'Huevos y lácteos'},
+  whey:{n:'Proteína en polvo',g:'prot',k:380,p:75,c:7,f:6,sec:'Otros'},
+  leche:{n:'Leche semidesnatada',g:'liq',k:46,p:3.2,c:4.7,f:1.6,ml:1,sec:'Huevos y lácteos'},
+  agua:{n:'Agua',g:'liq',k:0,p:0,c:0,f:0,ml:1,sec:null},
+  pan:{n:'Pan integral',g:'carb',k:245,p:9.5,c:42,f:3.3,sec:'Panadería y despensa'},
+  arroz:{n:'Arroz basmati (crudo)',g:'carb',k:355,p:8,c:78,f:0.6,sec:'Panadería y despensa'},
+  pasta:{n:'Macarrones (crudos)',g:'carb',k:359,p:12,c:72,f:1.5,sec:'Panadería y despensa'},
+  avena:{n:'Copos de avena',g:'carb',k:370,p:13,c:59,f:7,sec:'Panadería y despensa'},
+  patata:{n:'Patata',g:'carb',k:77,p:2,c:16,f:0.1,sec:'Fruta y verdura'},
+  batata:{n:'Batata',g:'carb',k:86,p:1.6,c:18,f:0.1,sec:'Fruta y verdura'},
+  garbanzos:{n:'Garbanzos cocidos',g:'carb',k:115,p:7,c:13,f:2,sec:'Conservas'},
+  platano:{n:'Plátano',g:'fruta',k:89,p:1.1,c:21,f:0.3,u:120,un:['plátano','plátanos'],sec:'Fruta y verdura'},
+  naranja:{n:'Naranja',g:'fruta',k:47,p:0.9,c:11.8,f:0.1,u:150,un:['naranja','naranjas'],sec:'Fruta y verdura'},
+  manzana:{n:'Manzana',g:'fruta',k:52,p:0.3,c:12,f:0.2,u:180,un:['manzana','manzanas'],sec:'Fruta y verdura'},
+  brocoli:{n:'Brócoli',g:'verd',k:35,p:2.8,c:4.5,f:0.4,sec:'Congelados'},
+  judias:{n:'Judías verdes',g:'verd',k:31,p:1.8,c:4.2,f:0.1,sec:'Congelados'},
+  zanahoria:{n:'Zanahoria',g:'verd',k:41,p:0.9,c:7,f:0.2,sec:'Fruta y verdura'},
+  ensalada:{n:'Ensalada (tomate, pepino, lechuga)',g:'verd',k:16,p:0.9,c:2.5,f:0.2,sec:'Fruta y verdura'},
+  tomtrit:{n:'Tomate triturado',g:'verd',k:30,p:1.3,c:4.5,f:0.2,sec:'Conservas'},
+  aove:{n:'AOVE',g:'grasa',k:899,p:0,c:0,f:99.9,sec:'Panadería y despensa'},
+  aguacate:{n:'Aguacate',g:'grasa',k:160,p:2,c:2,f:15,sec:'Fruta y verdura'},
+  nueces:{n:'Nueces',g:'grasa',k:680,p:15,c:4,f:65,sec:'Panadería y despensa'},
+};
+const GROUP_KEY = {prot:'p',carb:'c',grasa:'f',fruta:'c',verd:null,liq:null};
+const ALTS = {
+  prot:['pollo','pavo','atun','merluza','ternera','salmon','sardinas','claras','huevo','quesob','yogurp','whey'],
+  carb:['arroz','pasta','patata','pan','avena','batata','garbanzos'],
+  fruta:['platano','naranja','manzana'],
+  verd:['brocoli','judias','zanahoria','ensalada','tomtrit'],
+  grasa:['aove','aguacate','nueces'],
+  liq:['leche','agua'],
+};
+const GROUP_NAME = {prot:'Proteína',carb:'Hidratos',fruta:'Fruta',verd:'Verdura',grasa:'Grasa',liq:'Líquido'};
+
+/* ===================== Plan semanal (de 01_Dieta.md) ===================== */
+const DESAYUNO = [['huevo',220],['pan',100],['platano',120],['nueces',15]];
+const BATIDO = [['whey',30],['leche',250],['avena',40]];
+const ALM = {
+  pollo_arroz:[['pollo',200],['arroz',100],['brocoli',200],['zanahoria',100],['aove',10],['naranja',150]],
+  ternera_pasta:[['ternera',180],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
+  pollo_garbanzos:[['pollo',180],['arroz',70],['garbanzos',200],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
+  pollo_pasta:[['pollo',200],['pasta',100],['tomtrit',150],['brocoli',150],['aove',5],['naranja',150]],
+};
+const CEN = {
+  salmon:[['huevo',165],['salmon',150],['patata',550],['ensalada',250],['aove',10]],
+  atun:[['huevo',165],['atun',150],['patata',450],['ensalada',250],['aguacate',50]],
+  merluza:[['huevo',165],['merluza',125],['patata',550],['ensalada',250],['aove',10]],
+  pollo:[['huevo',165],['pollo',150],['patata',500],['ensalada',250],['aove',10]],
+  merluza_dom:[['huevo',110],['merluza',125],['patata',550],['ensalada',250],['aove',10]],
+};
+// 0 = domingo
+const WEEK = {
+  0:{almuerzo:ALM.pollo_garbanzos,cena:CEN.merluza_dom},
+  1:{almuerzo:ALM.pollo_arroz,cena:CEN.salmon},
+  2:{almuerzo:ALM.ternera_pasta,cena:CEN.atun},
+  3:{almuerzo:ALM.pollo_garbanzos,cena:CEN.merluza},
+  4:{almuerzo:ALM.pollo_pasta,cena:CEN.pollo},
+  5:{almuerzo:ALM.pollo_arroz,cena:CEN.salmon},
+  6:{almuerzo:ALM.ternera_pasta,cena:CEN.atun},
+};
+const MEAL_NAME = {desayuno:'Desayuno',almuerzo:'Almuerzo',merienda:'Batido',cena:'Cena'};
+const OTHER_PRESETS = {
+  ligero:{label:'Algo ligero',k:600,p:30,c:65,f:20},
+  normal:{label:'Comida normal',k:900,p:40,c:100,f:35},
+  copioso:{label:'Comida copiosa',k:1300,p:50,c:140,f:55},
+};
+const DAYS_SHORT = ['D','L','M','X','J','V','S'];
+const DAYS_LONG = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+
+/* ===================== Estado ===================== */
+const DEFAULTS = {
+  settings:{wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',notif:false,theme:'auto'},
+  days:{}, weights:{}, waist:{}, pantry:{}, shop:{},
+};
+let S;
+function load(){
+  try{ S = JSON.parse(localStorage.getItem(STORE)) || {}; }catch(e){ S = {}; }
+  S = Object.assign(structuredClone(DEFAULTS), S);
+  S.settings = Object.assign(structuredClone(DEFAULTS.settings), S.settings);
+}
+function save(){ try{ localStorage.setItem(STORE, JSON.stringify(S)); }catch(e){} }
+load();
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+
+/* ===================== Utilidades ===================== */
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const toMin = hhmm => { const [h,m] = hhmm.split(':').map(Number); return h*60+m; };
+const fmt = min => { min = Math.round(min); const d = ((min % 1440)+1440)%1440; return String(Math.floor(d/60)).padStart(2,'0')+':'+String(d%60).padStart(2,'0'); };
+const R = n => Math.round(n);
+function nowMin(){ const d = new Date(); let m = d.getHours()*60+d.getMinutes(); if (d.getHours() < 5) m += 1440; return m; }
+function dayKey(d = new Date()){ const x = new Date(d.getTime() - 5*3600e3); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
+function keyToDate(k){ const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d, 12); }
+function addDays(k, n){ const d = keyToDate(k); d.setDate(d.getDate()+n); return dayKey(new Date(d.getTime()+5*3600e3)); }
+function bedMin(){ let b = toMin(S.settings.bed); if (b < 5*60) b += 1440; return b; }
+function getDay(k){ return S.days[k] || (S.days[k] = {meals:{}}); }
+function mac(id, g){ const F = FOODS[id], r = g/100; return {k:F.k*r,p:F.p*r,c:F.c*r,f:F.f*r}; }
+function sumItems(items){ return items.reduce((a,it)=>{ const m = mac(it.id,it.g); a.k+=m.k; a.p+=m.p; a.c+=m.c; a.f+=m.f; return a; }, {k:0,p:0,c:0,f:0}); }
+const addM = (a,b,s=1) => ({k:a.k+s*b.k,p:a.p+s*b.p,c:a.c+s*b.c,f:a.f+s*b.f});
+const ZERO = {k:0,p:0,c:0,f:0};
+function roundG(id, g){ const F = FOODS[id]; if (g <= 0) return 0; if (F.u) return Math.max(1, Math.round(g/F.u))*F.u; return g >= 100 ? Math.round(g/10)*10 : Math.max(5, Math.round(g/5)*5); }
+function amount(id, g){ const F = FOODS[id]; if (F.u){ const n = Math.round(g/F.u); return n+' '+F.un[n===1?0:1]; } return R(g)+(F.ml?' ml':' g'); }
+function equiv(from, g, to){
+  const key = GROUP_KEY[FOODS[from].g];
+  if (!key || FOODS[to][key] <= 0 || FOODS[from][key] <= 0) return roundG(to, g);
+  return roundG(to, FOODS[from][key]*g/FOODS[to][key]);
+}
+function toast(msg, undo){
+  document.querySelectorAll('.toast').forEach(t=>t.remove());
+  const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = esc(msg) + (undo ? ' <button>Deshacer</button>' : '');
+  if (undo) t.querySelector('button').onclick = () => { undo(); t.remove(); };
+  document.body.appendChild(t); setTimeout(()=>t.remove(), 4000);
+}
+
+/* ===================== Entreno y horario ===================== */
+function trainOf(k){
+  const day = getDay(k), wd = keyToDate(k).getDay();
+  const t = day.train || {};
+  const on = t.on !== undefined ? t.on : S.settings.trainDays.includes(wd);
+  const start = toMin(t.time || S.settings.trainTime);
+  return {on, start, dur: t.dur || S.settings.trainDur, done: !!t.done, custom: t.on !== undefined || !!t.time};
+}
+function wakeOf(k){ const d = getDay(k); return toMin(d.wake || S.settings.wake); }
+
+function desiredTimes(wake, tr){
+  const bk = wake + 30, dinnerBase = wake + 720;
+  if (!tr.on) return {desayuno:bk, almuerzo:bk+270, cena:Math.max(dinnerBase, bk+570)};
+  const tS = tr.start, tE = tS + tr.dur;
+  if (tS < bk + 60){ // entreno nada más levantarse
+    const d = Math.max(bk, tE + 20), a = d + 240, m = a + 180;
+    return {desayuno:d, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 150)};
+  }
+  if (tS < 16*60){ const a = Math.max(bk + 150, tE + 30), m = a + 195; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 165)}; }
+  if (tS < 19*60){ const a = bk + 270, m = tE + 15; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 150)}; }
+  const a = bk + 270; return {desayuno:bk, almuerzo:a, merienda:a + 180, cena:tE + 30};
+}
+
+function schedule(k){
+  const day = getDay(k), tr = trainOf(k), wake = wakeOf(k), want = desiredTimes(wake, tr);
+  const order = ['desayuno','almuerzo'].concat(tr.on ? ['merienda'] : [], ['cena']);
+  // cada comida pendiente va, como pronto, «hueco mínimo» después de la anterior (hecha o prevista)
+  const out = {}, prevOf = {}; let prev = null;
+  for (const m of order){
+    const log = day.meals[m];
+    prevOf[m] = prev;
+    if (log && log.status !== 'pending'){
+      const t = log.at != null ? log.at : want[m];
+      out[m] = {t, status:log.status};
+      if (log.status !== 'skipped') prev = t;
+    } else {
+      const t = prev != null ? Math.max(want[m], prev + S.settings.gap) : want[m];
+      out[m] = {t, status:'pending'}; prev = t;
+    }
+  }
+  // si no cabe todo antes del límite, el batido se toma con la cena
+  const limit = toMin(S.settings.dinnerLimit);
+  if (out.merienda && out.merienda.status === 'pending' && out.cena.status === 'pending' && out.cena.t > limit){
+    out.merienda.merged = true;
+    const p = prevOf.merienda;
+    out.cena.t = p != null ? Math.max(want.cena, p + S.settings.gap) : want.cena;
+  }
+  return {order, times:out, tr, wake, want};
+}
+
+/* ===================== Plan del día y motor de ajuste ===================== */
+function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
+function basePlan(k, sch){
+  const wd = keyToDate(k).getDay(), day = getDay(k);
+  const plan = {desayuno:mkItems(DESAYUNO), almuerzo:mkItems(WEEK[wd].almuerzo), cena:mkItems(WEEK[wd].cena)};
+  if (sch.tr.on) plan.merienda = mkItems(BATIDO);
+  for (const m in plan){
+    const sw = (day.swaps || {})[m] || {};
+    plan[m] = plan[m].map((it, i) => {
+      if (sw[i]) return {id:sw[i].id, g:sw[i].g, from:it.id, why:'cambio'};
+      if (S.pantry[it.id] === 'falta'){
+        const alt = ALTS[FOODS[it.id].g].find(a => a !== it.id && S.pantry[a] !== 'falta' && (FOODS[a].sec || a === 'agua'));
+        if (alt) return {id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'};
+        return Object.assign({}, it, {missing:true});
+      }
+      return Object.assign({}, it);
+    });
+  }
+  return plan;
+}
+function consumedOf(log){
+  if (!log || log.status === 'pending' || log.status === 'skipped') return ZERO;
+  if (log.status === 'other') return {k:log.other.k,p:log.other.p,c:log.other.c,f:log.other.f};
+  return sumItems(log.items || []);
+}
+
+function computeDay(k){
+  const day = getDay(k), sch = computeSchedule(k), plan = basePlan(k, sch);
+  const minimo = !!day.minimo;
+  let target = ZERO, consumed = ZERO, bal = ZERO;
+  const meals = {};
+  for (const m of sch.order){
+    const t = sch.times[m], planned = sumItems(plan[m]);
+    target = addM(target, planned);
+    const log = day.meals[m];
+    meals[m] = {key:m, t:t.t, status:t.status, merged:!!t.merged, items:plan[m].map(x=>Object.assign({}, x)), base:planned, log, notes:[]};
+    if (t.status !== 'pending'){
+      const c = consumedOf(log); consumed = addM(consumed, c); bal = addM(bal, addM(c, planned, -1));
+      meals[m].items = log.status === 'other' ? [] : (log.items || []).map(x=>Object.assign({}, x));
+    }
+  }
+  // el batido que no cabe va con la cena
+  if (meals.merienda && meals.merienda.merged && meals.cena.status === 'pending'){
+    meals.cena.items = meals.cena.items.concat(meals.merienda.items.map(x => Object.assign({}, x, {fromBatido:true})));
+    meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
+  }
+  const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged);
+  const tips = [];
+  let added = ZERO;
+
+  // 1) Proteína: recuperar lo que falte
+  const deficitP = -bal.p;
+  if (deficitP > 4 && pending.length){
+    let left = deficitP;
+    pending.forEach((m, i) => {
+      const want = Math.min(40, left / (pending.length - i));
+      if (want < 3) return;
+      const got = boostProtein(meals[m], want);
+      added = addM(added, got); left -= got.p;
+    });
+    tips.push({cls:'', html:`Te faltaban <b>${R(deficitP)} g de proteína</b> por lo que ha pasado antes. Lo he repartido en lo que queda del día.`});
+  }
+  // 2) Calorías
+  if (!minimo && pending.length){
+    const net = bal.k + added.k;
+    if (bal.k < -150){
+      const extra = 0.5 * -bal.k - added.k;
+      if (extra > 60){
+        const got = scaleGroup(pending.map(m=>meals[m]), 'carb', extra, 0.6);
+        added = addM(added, got);
+        if (got.k > 30) tips.push({cls:'', html:`He recuperado <b>la mitad de las calorías</b> que faltaban (fase de volumen) con algo más de hidratos. La otra mitad no hace falta.`});
+      }
+    } else if (net > 120){
+      let cut = net;
+      const g1 = scaleGroup(pending.map(m=>meals[m]), 'carb', -cut, 0.6); cut += g1.k;
+      let g2 = ZERO; if (cut > 40) { g2 = scaleGroup(pending.map(m=>meals[m]), 'grasa', -cut, 1); cut += g2.k; }
+      added = addM(added, addM(g1, g2));
+      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado hidratos${g2.k<0?' y grasa':''} de lo que queda, sin tocar la proteína.${cut > 150 ? ' No pasa nada: mañana, normal.' : ''}`});
+    }
+  }
+  // 3) Cena tardía
+  const late = toMin(S.settings.lateDinner);
+  if (meals.cena.status === 'pending' && meals.cena.t >= late && !minimo){
+    const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb').reduce((a,x)=>a+mac(x.id,x.g).k,0);
+    const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
+    added = addM(added, got);
+    meals.cena.notes.push(`<b>Cena tardía</b>: misma proteína y un 40 % menos de hidratos para dormir mejor.`);
+  }
+  // marcar cambios visibles
+  for (const m of pending) markDeltas(meals[m]);
+
+  if (minimo) tips.unshift({cls:'amber', html:'<b>Día mínimo</b>: el único objetivo de hoy es llegar a la proteína. Lo demás, lo que puedas.'});
+  const remainingPlan = pending.reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
+  return {k, sch, meals, target, consumed, remainingPlan, tips, minimo, bal};
+}
+function computeSchedule(k){ return schedule(k); }
+
+function boostProtein(meal, wantP){
+  const items = meal.items;
+  if (meal.key === 'desayuno'){
+    const g = roundG('claras', wantP / FOODS.claras.p * 100);
+    items.push({id:'claras', g, added:true});
+    meal.notes.push(`+${amount('claras', g)} de claras para recuperar proteína.`);
+    return mac('claras', g);
+  }
+  if (meal.key === 'merienda'){
+    // primero más proteína en polvo (hasta +20 g), luego un yogur proteico si aún falta
+    let got = ZERO;
+    const w = items.find(x => x.id === 'whey');
+    if (w){
+      const before = w.g, g = Math.min(before + 20, roundG('whey', before + wantP / FOODS.whey.p * 100));
+      if (g > before){ w.orig = w.orig ?? before; w.g = g; got = mac('whey', g - before); meal.notes.push(`+${g - before} g de proteína en polvo en el batido.`); }
+    }
+    const rest = wantP - got.p;
+    if (rest > 5){
+      const g = roundG('yogurp', rest / FOODS.yogurp.p * 100);
+      items.push({id:'yogurp', g, added:true});
+      meal.notes.push(`+${amount('yogurp', g)} para recuperar proteína.`);
+      got = addM(got, mac('yogurp', g));
+    }
+    return got;
+  }
+  const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
+  let got = ZERO;
+  if (main){
+    // el plato principal crece como mucho un 60 %; el resto va en un extra
+    const before = main.g, maxP = mac(main.id, before).p * 0.6;
+    const g = roundG(main.id, before + Math.min(wantP, maxP) / FOODS[main.id].p * 100);
+    if (g > before){
+      main.g = g; main.orig = main.orig ?? before; got = mac(main.id, g - before);
+      meal.notes.push(`+${amount(main.id, g - before)} de ${FOODS[main.id].n.toLowerCase()} para recuperar proteína.`);
+    }
+  }
+  const rest = wantP - got.p;
+  if (rest > 5){
+    const extra = items.some(x => x.id === 'huevo') ? 'claras' : 'atun';
+    const g = roundG(extra, rest / FOODS[extra].p * 100);
+    items.push({id:extra, g, added:true});
+    meal.notes.push(`+${amount(extra, g)} de ${FOODS[extra].n.toLowerCase()}${extra === 'claras' ? ' (en la tortilla con los huevos)' : ''}.`);
+    got = addM(got, mac(extra, g));
+  }
+  return got;
+}
+// reparte deltaK (kcal, +/-) entre los alimentos de un grupo; maxFrac = cambio máximo relativo
+function scaleGroup(meals, grp, deltaK, maxFrac){
+  const cands = [];
+  meals.forEach(m => m.items.forEach(it => { if (FOODS[it.id].g === grp && !it.fromBatido) cands.push(it); }));
+  const totK = cands.reduce((a,it)=>a+mac(it.id,it.g).k,0);
+  if (!totK) return ZERO;
+  let frac = deltaK / totK;
+  frac = Math.max(-maxFrac, Math.min(maxFrac, frac));
+  let res = ZERO;
+  cands.forEach(it => {
+    const before = it.g, g = roundG(it.id, before * (1 + frac));
+    if (g === before) return;
+    it.orig = it.orig ?? before; it.g = g;
+    res = addM(res, addM(mac(it.id, g), mac(it.id, before), -1));
+  });
+  return res;
+}
+function markDeltas(meal){
+  meal.items.forEach(it => { if (it.orig != null && it.orig !== it.g) it.delta = it.g - it.orig; });
+}
+
+/* ===================== Render ===================== */
+let TAB = 'hoy';
+const app = document.getElementById('app');
+function render(){
+  document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === TAB ? 'page' : 'false'));
+  applyTheme();
+  ({hoy:renderHoy, compra:renderCompra, progreso:renderProgreso, ajustes:renderAjustes})[TAB]();
+  scheduleNotifications();
+}
+function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
+
+function renderHoy(){
+  const k = dayKey(), D = computeDay(k), day = getDay(k), now = nowMin();
+  const d = keyToDate(k);
+  const pT = D.target.p, pC = D.consumed.p, kT = D.target.k, kC = D.consumed.k;
+  const pLeft = Math.max(0, D.remainingPlan.p);
+  const kLeft = Math.max(0, D.remainingPlan.k);
+  const tr = D.sch.tr;
+  let h = `<header class="top"><div><h1>Hoy</h1><div class="sub">${DAYS_LONG[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}</div></div>
+    <button class="chip ${D.minimo?'on':''}" data-act="minimo">${D.minimo?'Día mínimo':'Día normal'}</button></header>
+  <div class="chips">
+    <button class="chip" data-act="wake">☀️ ${day.wake ? 'Levantado ' + day.wake : 'Despertar ' + S.settings.wake}</button>
+    <button class="chip ${tr.on?'on':''}" data-act="train">🏋️ ${tr.on ? (tr.done ? 'Entrenado ' : 'Entreno ') + fmt(tr.start) : 'Descanso'}</button>
+  </div>
+  <section class="card hero" aria-label="Resumen">
+    <div><div class="lbl">Proteína</div><div class="big num">${R(pC)}<span class="muted" style="font-size:20px"> / ${R(pT)} g</span></div>
+      <div class="bar"><i style="width:${Math.min(100, pC/pT*100)}%"></i></div>
+      <div class="small">Quedan <b class="num">${R(pLeft)} g</b> en el plan</div></div>
+    <div ${D.minimo?'style="opacity:.45"':''}><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
+      <div class="bar k"><i style="width:${Math.min(100, kC/kT*100)}%"></i></div>
+      <div class="small">Quedan <b class="num">${R(kLeft)} kcal</b></div></div>
+    <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.target.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.target.f)} g</span></div>
+  </section>`;
+  // avisos inteligentes
+  const tips = D.tips.slice();
+  const pend = D.sch.order.filter(m => D.meals[m].status === 'pending' && !D.meals[m].merged);
+  const overdue = pend.filter(m => now > D.meals[m].t + 45);
+  if (overdue.length) tips.push({cls:'amber', html:`<b>${MEAL_NAME[overdue[0]]}</b> sigue pendiente desde las ${fmt(D.meals[overdue[0]].t)}. Márcala o desliza para recolocar el día.`});
+  if (tr.on && !tr.done && now > tr.start + tr.dur + 30) tips.push({cls:'amber', html:`¿Has entrenado? Toca el entreno para confirmarlo o cambiarlo.`});
+  if (now >= toMin('21:30') && pLeft > 25 && pend.length <= 1) tips.push({cls:'coral', html:`Te quedan <b>${R(pLeft)} g de proteína</b>. Si no te entra la cena entera, prioriza el pescado/carne y los huevos.`});
+  if (tips.length) h += `<ul class="tips">${tips.map(t=>`<li class="${t.cls}">${t.html}</li>`).join('')}</ul>`;
+
+  // línea del día
+  const events = [];
+  for (const m of D.sch.order) if (!D.meals[m].merged) events.push({t:D.meals[m].t, type:'meal', m});
+  if (tr.on) events.push({t:tr.start, type:'train'});
+  events.push({t:bedMin(), type:'sleep'});
+  events.sort((a,b)=>a.t-b.t || (a.type==='train'?-1:1));
+  h += `<div class="timeline">`;
+  for (const e of events){
+    if (e.type === 'train'){
+      h += `<div class="ev trainev ${tr.done?'dim':''}"><div class="card" data-act="train" role="button" tabindex="0"><div class="evhead"><div class="evtime num">${fmt(tr.start)}</div><div class="evname">🏋️ Entreno</div><span class="badge ${tr.done?'done':''}">${tr.done?'Hecho':fmt(tr.start+tr.dur)}</span></div>
+        <div class="evnote">${tr.done ? 'Buen trabajo. El batido sigue al entreno.' : 'Toca para cambiar la hora, moverlo o marcarlo como hecho.'}</div></div></div>`;
+    } else if (e.type === 'sleep'){
+      h += `<div class="ev sleep"><div class="card"><div class="evhead"><div class="evtime num">${fmt(bedMin())}</div><div class="evname">🌙 A dormir</div><span class="badge">${fmt(toMin(S.settings.wake))}</span></div><div class="evnote">Desconecta pantallas 30 min antes. Objetivo: 8 h.</div></div></div>`;
+    } else h += mealCard(D.meals[e.m], now);
+  }
+  h += `</div>`;
+  app.innerHTML = h;
+  bindSwipes();
+}
+function mealCard(M, now){
+  const st = M.status;
+  const badge = st === 'done' ? `<span class="badge done">✓ ${fmt(M.t)}</span>`
+    : st === 'changed' ? `<span class="badge done">✓ con cambios</span>`
+    : st === 'other' ? `<span class="badge done">✓ otra cosa</span>`
+    : st === 'skipped' ? `<span class="badge skip">Saltada</span>`
+    : now > M.t + 45 ? `<span class="badge late">Pendiente</span>` : `<span class="badge">${R(sumItems(M.items).p)} g prot.</span>`;
+  let items = '';
+  if (st === 'other') items = `<ul class="items"><li><span>${esc(M.log.other.label)}</span><span class="amt num">${R(M.log.other.k)} kcal · ${R(M.log.other.p)} g prot.</span></li></ul>`;
+  else if (st !== 'skipped') items = `<ul class="items">${M.items.map((it,i)=>{
+      const cls = it.added ? 'plus' : it.delta > 0 ? 'plus' : it.delta < 0 ? 'minus' : it.missing ? 'miss' : '';
+      const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
+      const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>' : '';
+      const name = esc(FOODS[it.id].n) + sub;
+      return st === 'pending' && !it.added && !it.fromBatido
+        ? `<li class="${cls}"><button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button><span class="amt num">${amt}</span></li>`
+        : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
+    }).join('')}</ul>`;
+  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}</div>` : '';
+  const actions = st === 'pending'
+    ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
+    : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
+  return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
+    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${items}${notes}${actions}</div></div>`;
+}
+
+/* ===================== Acciones de comidas ===================== */
+function logMeal(m, status, extra = {}){
+  const k = dayKey(), day = getDay(k), D = computeDay(k);
+  const prev = day.meals[m] ? structuredClone(day.meals[m]) : null;
+  const items = D.meals[m].items.map(x => ({id:x.id, g:x.g}));
+  day.meals[m] = Object.assign({status, at: extra.at ?? nowMin(), items}, extra);
+  if (status === 'skipped') { day.meals[m].items = []; delete day.meals[m].at; }
+  // marcar el batido como tomado si iba con la cena
+  if (m === 'cena' && D.meals.merienda && D.meals.merienda.merged && status !== 'skipped'){
+    day.meals.merienda = {status:'done', at: day.meals[m].at, items: []};
+  }
+  save(); render();
+  toast(status === 'skipped' ? MEAL_NAME[m] + ' saltada: recoloco el día' : MEAL_NAME[m] + ' registrada', () => { if (prev) day.meals[m] = prev; else delete day.meals[m]; save(); render(); });
+}
+
+function sheet(html, onMount){
+  const root = document.getElementById('sheet-root');
+  root.innerHTML = `<div class="sheet-bg"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div></div>`;
+  const bg = root.firstChild;
+  bg.addEventListener('click', e => { if (e.target === bg) closeSheet(); });
+  if (onMount) onMount(bg.querySelector('.sheet'));
+}
+function closeSheet(){ document.getElementById('sheet-root').innerHTML = ''; }
+const timeInput = (id, val) => `<input type="time" id="${id}" value="${fmt(val)}">`;
+
+function sheetMore(m){
+  const k = dayKey(), D = computeDay(k), M = D.meals[m];
+  sheet(`<h2>${MEAL_NAME[m]}</h2><div class="sub">Prevista a las ${fmt(M.t)}</div>
+  <div class="stack">
+    <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
+    <button class="opt" data-x="edit"><span>✏️ Con cambios</span><span class="d">ajusta gramos o alimentos</span></button>
+    <button class="opt" data-x="other"><span>🍽️ Comí otra cosa / fuera</span><span class="d">ligero, normal, copioso…</span></button>
+    <button class="opt" data-x="skip"><span>⏭️ Me la salto</span><span class="d">se recoloca el resto</span></button>
+  </div>
+  <div id="atbox" hidden><label class="f">¿A qué hora?</label><div class="row">${timeInput('at', Math.min(nowMin(), M.t))}<button class="btn pri" data-x="atok">Guardar</button></div></div>`, el => {
+    el.addEventListener('click', e => {
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      const a = x.dataset.x;
+      if (a === 'at') el.querySelector('#atbox').hidden = false;
+      if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
+      if (a === 'edit') sheetEdit(m);
+      if (a === 'other') sheetOther(m);
+      if (a === 'skip'){ closeSheet(); logMeal(m, 'skipped'); }
+    });
+  });
+}
+
+function sheetEdit(m){
+  const k = dayKey(), D = computeDay(k);
+  let items = D.meals[m].items.map(x => ({id:x.id, g:x.g}));
+  const draw = el => {
+    el.querySelector('#ed').innerHTML = items.map((it,i)=>{
+      const F = FOODS[it.id], val = F.u ? Math.round(it.g/F.u) : R(it.g);
+      return `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(F.n)}</div>
+        <input type="number" inputmode="decimal" min="0" step="${F.u?1:5}" value="${val}" data-i="${i}" style="width:92px">
+        <span class="muted" style="width:52px;font-size:13px">${F.u?F.un[1]:F.ml?'ml':'g'}</span>
+        <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
+    const t = sumItems(items);
+    el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`;
+  };
+  sheet(`<h2>${MEAL_NAME[m]} con cambios</h2><div class="sub">Pon lo que has comido de verdad.</div>
+    <div id="ed"></div>
+    <label class="f">Añadir alimento</label>
+    <div class="row"><select id="addf">${Object.entries(FOODS).filter(([id,F])=>F.sec).map(([id,F])=>`<option value="${id}">${esc(F.n)}</option>`).join('')}</select><button class="btn sm" id="addb">Añadir</button></div>
+    <div class="muted num" id="edsum" style="margin:14px 0 8px"></div>
+    <label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), D.meals[m].t))}
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    draw(el);
+    el.addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id]; const v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = sumItems(items); el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`; });
+    el.addEventListener('click', e => {
+      if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); draw(el); }
+      if (e.target.id === 'addb'){ const id = el.querySelector('#addf').value; items.push({id, g: FOODS[id].u || 100}); draw(el); }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'cancel') closeSheet();
+      if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0)}); }
+    });
+  });
+}
+
+function sheetOther(m){
+  let sel = 'normal';
+  sheet(`<h2>Comí otra cosa</h2><div class="sub">Una estimación vale. El resto del día se ajusta solo.</div>
+    <div class="stack" id="pre">${Object.entries(OTHER_PRESETS).map(([id,p])=>`<button class="opt ${id===sel?'sel':''}" data-p="${id}"><span>${p.label}</span><span class="d num">~${p.k} kcal · ${p.p} g prot.</span></button>`).join('')}
+      <button class="opt" data-p="custom"><span>Lo sé más o menos</span><span class="d">pon kcal y proteína</span></button></div>
+    <div id="cust" hidden><div class="row"><div style="flex:1"><label class="f">Kcal</label><input type="number" inputmode="numeric" id="ck" value="800"></div><div style="flex:1"><label class="f">Proteína (g)</label><input type="number" inputmode="numeric" id="cp" value="35"></div></div></div>
+    <label class="f">¿Qué era? (opcional)</label><input id="lbl" placeholder="Menú del día, pizza, cumple…">
+    <label class="f">Hora</label>${timeInput('at', Math.min(nowMin(), computeDay(dayKey()).meals[m].t))}
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    el.addEventListener('click', e => {
+      const p = e.target.closest('[data-p]');
+      if (p){ sel = p.dataset.p; el.querySelectorAll('[data-p]').forEach(b=>b.classList.toggle('sel', b === p)); el.querySelector('#cust').hidden = sel !== 'custom'; }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'cancel') return closeSheet();
+      let o;
+      if (sel === 'custom'){ const kc = +el.querySelector('#ck').value || 0, pr = +el.querySelector('#cp').value || 0, rest = Math.max(0, kc - pr*4); o = {k:kc, p:pr, c:rest*0.55/4, f:rest*0.45/9, label:'Comida fuera'}; }
+      else o = Object.assign({}, OTHER_PRESETS[sel]);
+      const lbl = el.querySelector('#lbl').value.trim(); if (lbl) o.label = lbl;
+      let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440;
+      closeSheet(); logMeal(m, 'other', {at:t, other:o, items:[]});
+    });
+  });
+}
+
+function sheetSwap(m, i){
+  const k = dayKey(), D = computeDay(k), it = D.meals[m].items[i];
+  const base = basePlan(k, D.sch)[m][i];
+  const orig = base.from || base.id, origG = base.from ? WEEKG(m, i, k) : base.g;
+  const grp = FOODS[orig].g;
+  const alts = ALTS[grp].filter(a => FOODS[a].sec || a === 'agua');
+  sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${GROUP_NAME[grp].toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
+    <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = S.pantry[a]==='falta';
+      return `<button class="opt ${a===it.id?'sel':''}" data-a="${a}" data-g="${g}"><span>${esc(FOODS[a].n)}${miss?' <span style="color:var(--coral);font-size:12px">(no hay)</span>':''}</span><span class="d num">${amount(a,g)}</span></button>`; }).join('')}</div>
+    <div class="evactions"><button class="btn danger" data-x="falta">No tengo ${esc(FOODS[it.id].n.toLowerCase())}</button></div>`, el => {
+    el.addEventListener('click', e => {
+      const day = getDay(k);
+      const a = e.target.closest('[data-a]');
+      if (a){
+        day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
+        if (a.dataset.a === orig) delete day.swaps[m][i]; else day.swaps[m][i] = {id:a.dataset.a, g:+a.dataset.g};
+        save(); closeSheet(); render(); return;
+      }
+      const x = e.target.closest('[data-x]');
+      if (x && x.dataset.x === 'falta'){ S.pantry[it.id] = 'falta'; if (day.swaps && day.swaps[m]) delete day.swaps[m][i]; save(); closeSheet(); render(); toast(FOODS[it.id].n + ' añadido a la lista de la compra'); }
+    });
+  });
+}
+function WEEKG(m, i, k){ const wd = keyToDate(k).getDay(); const arr = m === 'desayuno' ? DESAYUNO : m === 'merienda' ? BATIDO : WEEK[wd][m]; return arr[i][1]; }
+
+function sheetWake(){
+  const day = getDay(dayKey());
+  sheet(`<h2>Despertar</h2><div class="sub">Todo el día se coloca a partir de aquí.</div>
+    <div class="stack"><button class="opt" data-x="now"><span>☀️ Me acabo de levantar</span><span class="d num">${fmt(nowMin())}</span></button></div>
+    <label class="f">O elige la hora</label><div class="row">${timeInput('w', day.wake ? toMin(day.wake) : toMin(S.settings.wake))}<button class="btn pri" data-x="ok">Guardar</button></div>
+    ${day.wake?'<div class="evactions"><button class="btn ghost" data-x="reset">Volver a la hora por defecto</button></div>':''}`, el => {
+    el.addEventListener('click', e => {
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'now') day.wake = fmt(nowMin());
+      if (x.dataset.x === 'ok') day.wake = el.querySelector('#w').value;
+      if (x.dataset.x === 'reset') delete day.wake;
+      save(); closeSheet(); render();
+    });
+  });
+}
+
+function sheetTrain(){
+  const k = dayKey(), day = getDay(k), tr = trainOf(k);
+  sheet(`<h2>Entreno de hoy</h2><div class="sub">${tr.on ? 'Previsto a las ' + fmt(tr.start) : 'Hoy no hay entreno previsto'}. Cambia lo que haga falta.</div>
+    <div class="seg" style="margin-bottom:12px"><button data-x="on" class="${tr.on?'on':''}">Entreno hoy</button><button data-x="off" class="${!tr.on?'on':''}">Descanso</button></div>
+    <div ${tr.on?'':'hidden'} id="trbox">
+      <label class="f">Hora de inicio</label>${timeInput('tt', tr.start)}
+      <label class="f">Duración</label><div class="seg" id="dur">${[45,60,75,90].map(d=>`<button data-d="${d}" class="${tr.dur===d?'on':''}">${d} min</button>`).join('')}</div>
+      <div class="evactions"><button class="btn" data-x="save">Guardar hora</button><button class="btn pri" data-x="done">${tr.done?'Desmarcar hecho':'✓ Ya he entrenado'}</button></div>
+    </div>`, el => {
+    let dur = tr.dur;
+    el.addEventListener('click', e => {
+      const d = e.target.closest('[data-d]'); if (d){ dur = +d.dataset.d; el.querySelectorAll('[data-d]').forEach(b=>b.classList.toggle('on', b===d)); return; }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      day.train = day.train || {};
+      if (x.dataset.x === 'on'){ day.train.on = true; save(); closeSheet(); render(); return sheetTrain(); }
+      if (x.dataset.x === 'off'){ day.train.on = false; day.train.done = false; save(); closeSheet(); render(); toast('Hoy descanso: quito el batido'); return; }
+      day.train.on = true; day.train.time = el.querySelector('#tt').value; day.train.dur = dur;
+      if (x.dataset.x === 'done') day.train.done = !tr.done;
+      save(); closeSheet(); render();
+    });
+  });
+}
+
+/* ===================== Swipe para marcar hecha ===================== */
+function bindSwipes(){
+  app.querySelectorAll('.ev[data-swipe]').forEach(ev => {
+    const m = ev.dataset.swipe; if (!m) return;
+    const card = ev.querySelector('.card'), bg = ev.querySelector('.swipebg');
+    let x0 = null, y0 = null, dx = 0, active = false;
+    ev.addEventListener('pointerdown', e => { if (e.target.closest('button,input,select')) return; x0 = e.clientX; y0 = e.clientY; dx = 0; active = false; });
+    ev.addEventListener('pointermove', e => {
+      if (x0 == null) return;
+      const ddx = e.clientX - x0, ddy = e.clientY - y0;
+      if (!active && Math.abs(ddx) > 12 && Math.abs(ddx) > Math.abs(ddy)*1.5){ active = true; ev.classList.add('drag'); try{ ev.setPointerCapture(e.pointerId); }catch(_){} }
+      if (!active) return;
+      dx = Math.max(0, ddx); card.style.transform = `translateX(${dx}px)`; bg.style.opacity = Math.min(1, dx/110);
+    });
+    const end = () => {
+      if (x0 == null) return; x0 = null; ev.classList.remove('drag');
+      if (active && dx > 110){ card.style.transform = 'translateX(110%)'; setTimeout(()=>logMeal(m, 'done'), 120); }
+      else { card.style.transform = ''; bg.style.opacity = 0; }
+      active = false;
+    };
+    ev.addEventListener('pointerup', end); ev.addEventListener('pointercancel', end);
+  });
+}
+
+/* ===================== Despensa y compra ===================== */
+function weeklyNeeds(){
+  const need = {};
+  const add = (arr, mult=1) => arr.forEach(([id,g]) => need[id] = (need[id]||0) + g*mult);
+  for (let wd = 0; wd < 7; wd++){ add(DESAYUNO); add(WEEK[wd].almuerzo); add(WEEK[wd].cena); }
+  add(BATIDO, S.settings.trainDays.length);
+  return need;
+}
+function renderCompra(){
+  const need = weeklyNeeds();
+  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec && (need[id] || S.pantry[id] === 'falta'));
+  const falta = ids.filter(id => S.pantry[id] === 'falta');
+  const bySec = {}; ids.forEach(id => (bySec[FOODS[id].sec] = bySec[FOODS[id].sec] || []).push(id));
+  const q = id => need[id] ? `${amount(id, need[id])} / semana` : 'fuera del plan';
+  let h = `<header class="top"><div><h1>Despensa</h1><div class="sub">Marca lo que se acaba; la app lo cambia por un equivalente.</div></div></header>`;
+  h += `<h3 class="sec">Lista de la compra (${falta.length})</h3><div class="card list" style="padding:4px 0">`;
+  h += falta.length ? falta.map(id => `<div class="li"><button class="check ${S.shop[id]?'on':''}" data-act="bought" data-id="${id}" aria-label="Comprado">${S.shop[id]?'✓':''}</button><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div></div></div>`).join('')
+    : `<div class="empty">No falta nada. Cuando algo se acabe, márcalo abajo.</div>`;
+  h += `</div>`;
+  if (falta.length) h += `<div class="evactions" style="margin-bottom:6px"><button class="btn" data-act="copylist">Copiar lista</button><button class="btn pri" data-act="restock">Guardar lo comprado</button></div>`;
+  for (const sec of Object.keys(bySec).sort()){
+    h += `<h3 class="sec">${esc(sec)}</h3><div class="card list" style="padding:4px 0">` + bySec[sec].map(id => {
+      const f = S.pantry[id] === 'falta';
+      return `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div></div><button class="tog ${f?'falta':''}" data-act="pantry" data-id="${id}">${f?'Se acabó':'Hay'}</button></div>`; }).join('') + `</div>`;
+  }
+  app.innerHTML = h;
+}
+
+/* ===================== Progreso ===================== */
+function weekStart(k){ const d = keyToDate(k); const wd = (d.getDay()+6)%7; return addDays(k, -wd); }
+function weeklyAvgs(){
+  const by = {};
+  Object.entries(S.weights).forEach(([k,v]) => { const w = weekStart(k); (by[w] = by[w] || []).push(v); });
+  return Object.keys(by).sort().map(w => ({w, avg: by[w].reduce((a,b)=>a+b,0)/by[w].length, n: by[w].length}));
+}
+function renderProgreso(){
+  const k = dayKey(), today = S.weights[k];
+  const keys = Object.keys(S.weights).sort();
+  const weeks = weeklyAvgs();
+  let h = `<header class="top"><div><h1>Progreso</h1><div class="sub">Pésate al levantarte, después del baño.</div></div></header>
+  <div class="card"><label class="f" style="margin-top:0">Peso de hoy (kg)</label><div class="row"><input type="number" inputmode="decimal" step="0.1" id="wt" value="${today ?? ''}" placeholder="75,0"><button class="btn pri sm" data-act="saveweight">Guardar</button></div></div>`;
+  if (keys.length >= 2) h += `<div class="card">${chart(keys.slice(-42))}<div class="muted" style="font-size:12px">Puntos: peso diario · línea: media de 7 días</div></div>`;
+  // regla del volumen
+  const full = weeks.filter(w => w.w < weekStart(k) && w.n >= 3);
+  let advice = 'Necesito al menos 3 semanas con 3 o más pesadas para recomendarte algo. Sigue así.';
+  if (full.length >= 3){
+    const [a,b,c] = full.slice(-3).map(w=>w.avg), d1 = b-a, d2 = c-b;
+    if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: añade <b>+150 kcal</b> (por ejemplo, +30 g de arroz o pasta en el almuerzo). Díselo a tu entrenador para actualizar el plan.`;
+    else if (d2 > 0.35) advice = `<b>Subes más de 0,35 kg/semana</b>: quita la avena del batido y revisamos la cintura.`;
+    else advice = `Ritmo correcto (${d2>=0?'+':''}${d2.toFixed(2).replace('.',',')} kg la última semana). <b>No toques nada.</b>`;
+  } else if (full.length === 2){ const d = full[1].avg - full[0].avg; advice = `Última semana: <b>${d>=0?'+':''}${d.toFixed(2).replace('.',',')} kg</b>. Objetivo: +0,15 a +0,25 kg/semana. Con una semana más te digo si hay que ajustar.`; }
+  h += `<ul class="tips"><li>${advice}</li></ul>`;
+  if (weeks.length) h += `<h3 class="sec">Medias semanales</h3><div class="card" style="padding:6px 12px"><table class="t num"><tr><th>Semana</th><th>Media</th><th>Cambio</th><th>Días</th></tr>${weeks.slice(-8).reverse().map((w,i,arr)=>{ const prev = arr[i+1]; const d = prev ? w.avg - prev.avg : null; const dd = keyToDate(w.w);
+    return `<tr><td>${dd.getDate()} ${MONTHS[dd.getMonth()]}</td><td>${w.avg.toFixed(1).replace('.',',')}</td><td>${d==null?'—':(d>=0?'+':'')+d.toFixed(2).replace('.',',')}</td><td>${w.n}</td></tr>`; }).join('')}</table></div>`;
+  // cintura
+  const wk = Object.keys(S.waist).sort();
+  h += `<h3 class="sec">Cintura (cada 2 semanas)</h3><div class="card"><div class="row"><input type="number" inputmode="decimal" step="0.5" id="wa" placeholder="cm a la altura del ombligo"><button class="btn sm" data-act="savewaist">Guardar</button></div>
+    ${wk.length ? `<table class="t num" style="margin-top:8px">${wk.slice(-6).reverse().map(x=>{const d=keyToDate(x);return `<tr><td>${d.getDate()} ${MONTHS[d.getMonth()]}</td><td>${String(S.waist[x]).replace('.',',')} cm</td></tr>`;}).join('')}</table>` : ''}</div>`;
+  // adherencia
+  h += `<h3 class="sec">Últimos 7 días</h3><div class="card">${adherence()}</div>`;
+  app.innerHTML = h;
+}
+function adherence(){
+  let meals = 0, ok = 0, protDays = 0, days = 0;
+  for (let i = 1; i <= 7; i++){
+    const k = addDays(dayKey(), -i); if (!S.days[k]) continue;
+    const D = computeDay(k); days++;
+    D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed'].includes(D.meals[m].status)) ok++; });
+    if (D.consumed.p >= D.target.p * 0.9) protDays++;
+  }
+  if (!days) return `<div class="empty">Aún no hay días registrados.</div>`;
+  const pct = R(ok/meals*100);
+  return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
+    <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>`;
+}
+function chart(keys){
+  const W = 520, H = 150, P = 18;
+  const vals = keys.map(k => S.weights[k]);
+  const t0 = keyToDate(keys[0]).getTime(), t1 = keyToDate(keys[keys.length-1]).getTime() || t0+1;
+  let lo = Math.min(...vals), hi = Math.max(...vals); if (hi - lo < 1){ lo -= .5; hi += .5; }
+  const x = k => P + (keyToDate(k).getTime()-t0)/Math.max(1,(t1-t0))*(W-2*P), y = v => H-P - (v-lo)/(hi-lo)*(H-2*P);
+  const ma = keys.map(k => { const ws = keys.filter(j => j <= k && j > addDays(k,-7)).map(j=>S.weights[j]); return [k, ws.reduce((a,b)=>a+b,0)/ws.length]; });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolución del peso">
+    <text x="${P}" y="12" font-size="11" fill="var(--muted)">${hi.toFixed(1)}</text><text x="${P}" y="${H-4}" font-size="11" fill="var(--muted)">${lo.toFixed(1)}</text>
+    <polyline fill="none" stroke="var(--lime)" stroke-width="3" stroke-linejoin="round" points="${ma.map(([k,v])=>x(k)+','+y(v)).join(' ')}"/>
+    ${keys.map(k=>`<circle cx="${x(k)}" cy="${y(S.weights[k])}" r="3" fill="var(--muted)"/>`).join('')}</svg>`;
+}
+
+/* ===================== Ajustes ===================== */
+function renderAjustes(){
+  const s = S.settings;
+  app.innerHTML = `<header class="top"><div><h1>Ajustes</h1><div class="sub">Son puntos de partida: cada día se puede cambiar todo desde «Hoy».</div></div></header>
+  <div class="card">
+    <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Despertar</label><input type="time" data-s="wake" value="${s.wake}"></div><div style="flex:1"><label class="f" style="margin-top:0">A dormir</label><input type="time" data-s="bed" value="${s.bed}"></div></div>
+    <div class="row"><div style="flex:1"><label class="f">Entreno habitual</label><input type="time" data-s="trainTime" value="${s.trainTime}"></div><div style="flex:1"><label class="f">Duración (min)</label><input type="number" data-s="trainDur" value="${s.trainDur}"></div></div>
+    <label class="f">Días de entreno habituales</label>
+    <div class="days">${[1,2,3,4,5,6,0].map(d=>`<button data-act="tday" data-d="${d}" class="${s.trainDays.includes(d)?'on':''}">${DAYS_SHORT[d]}</button>`).join('')}</div>
+    <div class="row"><div style="flex:1"><label class="f">Hueco mínimo entre comidas</label><select data-s="gap">${[120,150,180].map(g=>`<option value="${g}" ${s.gap==g?'selected':''}>${g/60} h</option>`).join('').replace('2.5 h','2 h 30')}</select></div>
+      <div style="flex:1"><label class="f">Cena, como muy tarde</label><input type="time" data-s="dinnerLimit" value="${s.dinnerLimit}"></div></div>
+  </div>
+  <div class="card">
+    <label class="f" style="margin-top:0">Recordatorios</label>
+    <button class="opt" data-act="notif"><span>${s.notif && 'Notification' in window && Notification.permission==='granted' ? '🔔 Activados' : '🔕 Activar recordatorios'}</span><span class="d">${s.notif?'con la app abierta':'pedir permiso'}</span></button>
+    <div class="muted" style="font-size:13px;margin-top:8px">De momento avisan solo con la app abierta o en segundo plano. Los avisos con la app cerrada llegan en la fase 2.</div>
+    <label class="f">Tema</label>
+    <div class="seg">${[['auto','Auto'],['dark','Oscuro'],['light','Claro']].map(([v,l])=>`<button data-act="theme" data-v="${v}" class="${s.theme===v?'on':''}">${l}</button>`).join('')}</div>
+  </div>
+  <div class="card">
+    <label class="f" style="margin-top:0">Copia de seguridad</label>
+    <div class="evactions" style="margin-top:0"><button class="btn" data-act="export">Exportar</button><label class="btn" style="cursor:pointer">Importar<input type="file" accept="application/json" id="imp" hidden></label></div>
+  </div>
+  <div class="muted" style="text-align:center;font-size:12px">Versión ${VERSION}</div>`;
+  app.querySelectorAll('[data-s]').forEach(inp => inp.addEventListener('change', () => {
+    const key = inp.dataset.s; let v = inp.value;
+    if (['trainDur','gap'].includes(key)) v = +v;
+    S.settings[key] = v; save(); toast('Guardado');
+  }));
+  app.querySelector('#imp').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try{ const data = JSON.parse(await f.text()); if (!data.settings || !data.days) throw 0; localStorage.setItem(STORE, JSON.stringify(data)); load(); render(); toast('Datos importados'); }
+    catch(_){ toast('Ese archivo no es una copia válida'); }
+  });
+}
+
+/* ===================== Recordatorios (fase 1: con la app viva) ===================== */
+let timers = [];
+async function notify(title, body, tag){
+  try{ const reg = await navigator.serviceWorker.ready; reg.showNotification(title, {body, tag, icon:'icon-192.png', badge:'icon-192.png'}); }
+  catch(_){ try{ new Notification(title, {body, tag}); }catch(__){} }
+}
+function scheduleNotifications(){
+  timers.forEach(clearTimeout); timers = [];
+  if (!S.settings.notif || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const k = dayKey(), D = computeDay(k), now = nowMin();
+  const at = (min, f) => { const ms = (min - now)*60000 - new Date().getSeconds()*1000; if (ms > 0 && ms < 18*3600e3) timers.push(setTimeout(f, ms)); };
+  D.sch.order.forEach(m => {
+    const M = D.meals[m]; if (M.status !== 'pending' || M.merged) return;
+    const what = M.items.slice(0,3).map(it => FOODS[it.id].n.toLowerCase()).join(', ');
+    at(M.t, () => notify(`🍽️ ${MEAL_NAME[m]} · ${fmt(M.t)}`, what + (M.notes.length ? ' · con ajustes' : ''), 'meal-'+m));
+    at(M.t + 45, () => { const D2 = computeDay(dayKey()); if (D2.meals[m].status === 'pending') notify(`${MEAL_NAME[m]} pendiente`, 'Márcala o dime qué ha pasado y recoloco el día.', 'meal-'+m); });
+  });
+  if (D.sch.tr.on && !D.sch.tr.done) at(D.sch.tr.start - 30, () => notify('🏋️ Entreno en 30 min', 'Si cambia la hora, muévelo en la app.', 'train'));
+  at(toMin('21:30'), () => { const D2 = computeDay(dayKey()); const left = D2.remainingPlan.p; if (left > 25) notify(`Te quedan ${R(left)} g de proteína`, 'Prioriza la proteína de la cena.', 'prot'); });
+  at(bedMin() - 30, () => notify('🌙 Desconecta', `A dormir a las ${S.settings.bed}. Mañana, ${S.settings.wake}.`, 'bed'));
+}
+
+/* ===================== Eventos globales ===================== */
+document.querySelector('nav.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (!b) return; TAB = b.dataset.tab; window.scrollTo(0,0); render(); });
+app.addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const a = b.dataset.act, m = b.dataset.m;
+  if (a === 'done') logMeal(m, 'done');
+  else if (a === 'more') sheetMore(m);
+  else if (a === 'undo'){ const day = getDay(dayKey()); const prev = day.meals[m]; delete day.meals[m]; if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
+  else if (a === 'swap') sheetSwap(m, +b.dataset.i);
+  else if (a === 'wake') sheetWake();
+  else if (a === 'train') sheetTrain();
+  else if (a === 'minimo'){ const day = getDay(dayKey()); day.minimo = !day.minimo; save(); render(); }
+  else if (a === 'pantry'){ const id = b.dataset.id; if (S.pantry[id] === 'falta'){ delete S.pantry[id]; delete S.shop[id]; } else S.pantry[id] = 'falta'; save(); render(); }
+  else if (a === 'bought'){ const id = b.dataset.id; S.shop[id] = !S.shop[id]; save(); render(); }
+  else if (a === 'restock'){ Object.keys(S.shop).forEach(id => { if (S.shop[id]){ delete S.pantry[id]; delete S.shop[id]; } }); save(); render(); toast('Despensa actualizada'); }
+  else if (a === 'copylist'){ const need = weeklyNeeds(); const txt = 'Lista de la compra\n' + Object.keys(S.pantry).filter(id=>S.pantry[id]==='falta').map(id => '- ' + FOODS[id].n + (need[id] ? ' (' + amount(id, need[id]) + ')' : '')).join('\n'); try{ await navigator.clipboard.writeText(txt); toast('Lista copiada'); }catch(_){ toast('No se pudo copiar'); } }
+  else if (a === 'saveweight'){ const v = parseFloat(String(document.getElementById('wt').value).replace(',','.')); if (v > 30 && v < 250){ S.weights[dayKey()] = Math.round(v*10)/10; save(); render(); toast('Peso guardado'); } else toast('Peso no válido'); }
+  else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } }
+  else if (a === 'tday'){ const d = +b.dataset.d, s = S.settings; s.trainDays = s.trainDays.includes(d) ? s.trainDays.filter(x=>x!==d) : s.trainDays.concat(d); save(); render(); }
+  else if (a === 'theme'){ S.settings.theme = b.dataset.v; save(); render(); }
+  else if (a === 'notif'){
+    if (!('Notification' in window)) return toast('Este navegador no permite avisos');
+    const p = await Notification.requestPermission(); S.settings.notif = p === 'granted'; save(); render();
+    if (p === 'granted') notify('🔔 Recordatorios activados', 'Te avisaré de cada comida.', 'test'); else toast('Permiso denegado');
+  }
+  else if (a === 'export'){ const blob = new Blob([JSON.stringify(S, null, 1)], {type:'application/json'}); const url = URL.createObjectURL(blob); const l = document.createElement('a'); l.href = url; l.download = 'dieta-' + dayKey() + '.json'; l.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000); }
+});
+app.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role=button]')){ e.preventDefault(); e.target.click(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+setInterval(() => { if (!document.hidden && TAB === 'hoy' && !document.querySelector('.sheet')) render(); }, 60000);
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+render();
+</script>
+</body>
+</html>
