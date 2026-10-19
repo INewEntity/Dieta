@@ -95,6 +95,9 @@ header.top .sub{color:var(--muted);font-size:14px}
 .ev.dim .card{opacity:.62}
 .ev.sleep .card{background:transparent}
 .macroline{font-size:12px;color:var(--muted);margin-top:6px}
+.mm{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.mm span{font-size:12px;color:var(--muted);background:var(--card2);border:1px solid var(--line);border-radius:99px;padding:3px 9px}
+.mm b{color:var(--text);font-weight:700}
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);border-top:1px solid var(--line);display:flex;justify-content:center;padding:8px 8px calc(8px + env(safe-area-inset-bottom));z-index:5}
 nav.tabs .in{display:flex;max-width:560px;width:100%}
 nav.tabs button{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;font-size:12px;font-weight:700;color:var(--muted);border-radius:12px}
@@ -152,7 +155,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 11;
+const VERSION = 12;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -766,7 +769,10 @@ function mealCard(M, now){
     : st === 'changed' ? `<span class="badge done">✓ con cambios</span>`
     : st === 'other' ? `<span class="badge done">✓ otra cosa</span>`
     : st === 'skipped' ? `<span class="badge skip">Saltada</span>`
-    : now > M.t + 45 ? `<span class="badge late">Pendiente</span>` : `<span class="badge">${R(sumItems(M.items).p)} g prot.</span>`;
+    : now > M.t + 45 ? `<span class="badge late">Pendiente</span>` : '';
+  // macros de la comida: lo previsto si está pendiente, lo comido si ya está registrada
+  const mt = st === 'pending' ? sumItems(M.items) : st === 'skipped' ? null : consumedOf(M.log);
+  const macros = mt ? `<div class="mm num"><span><b>${R(mt.k)}</b> kcal</span><span><b>${R(mt.p)}</b> g P</span><span><b>${R(mt.c)}</b> g H</span><span><b>${R(mt.f)}</b> g G</span></div>` : '';
   let items = '';
   if (st !== 'pending' && st !== 'skipped'){
     const rows = M.items.map(it => `<li><span>${esc(FOODS[it.id].n)}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`);
@@ -791,7 +797,7 @@ function mealCard(M, now){
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
   return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
-    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${items}${notes}${actions}</div></div>`;
+    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
 }
 
 /* ===================== Acciones de comidas ===================== */
