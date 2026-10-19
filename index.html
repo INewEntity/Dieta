@@ -152,7 +152,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 7;
+const VERSION = 8;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -456,6 +456,17 @@ function fitToTarget(plan){
   const cf = all.filter(it => FOODS[it.id].g === 'carb' || FOODS[it.id].g === 'grasa');
   const kCF = cf.reduce((a,it) => a + mac(it.id, it.g).k, 0), k1 = sumItems(all).k;
   if (kCF > 0){ const s = Math.max(0.35, Math.min(1.8, 1 + (kT - k1) / kCF)); cf.forEach(it => it.g = roundG(it.id, it.g * s)); }
+  // Ajuste fino: el redondeo (huevos enteros, gramos de 5 en 5…) deja el día unos gramos fuera del objetivo.
+  // Se corrige con el alimento más grande que se pueda pesar libremente: proteína con carne/pescado, kcal con
+  // patata/arroz/pasta. Dos pasadas, porque tocar uno mueve un poco el otro.
+  const libre = grp => all.filter(it => FOODS[it.id].g === grp && !FOODS[it.id].u && it.g >= 40 && FOODS[it.id][grp === 'prot' ? 'p' : 'k'] > 0)
+    .sort((a, b) => b.g - a.g)[0];
+  for (let pass = 0; pass < 2; pass++){
+    const P = libre('prot'), gapP = pT - sumItems(all).p;
+    if (P && Math.abs(gapP) >= 1) P.g = Math.max(40, Math.round((P.g + gapP / FOODS[P.id].p * 100) / 5) * 5);
+    const C = libre('carb'), gapK = kT - sumItems(all).k;
+    if (C && Math.abs(gapK) >= 15) C.g = Math.max(40, Math.round((C.g + gapK / FOODS[C.id].k * 100) / 5) * 5);
+  }
 }
 function basePlan(k, sch, opts = {}){
   const wd = keyToDate(k).getDay(), day = getDay(k);
@@ -674,7 +685,8 @@ function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.do
 function renderHoy(){
   const k = dayKey(), D = computeDay(k), day = getDay(k), now = nowMin();
   const d = keyToDate(k);
-  const pT = D.target.p, pC = D.consumed.p, kT = D.target.k, kC = D.consumed.k;
+  // el objetivo que se ve es el de Ajustes; el plan del día queda a ±15 kcal y ±1 g de él tras el ajuste fino
+  const pT = +S.settings.prot || D.target.p, pC = D.consumed.p, kT = +S.settings.kcal || D.target.k, kC = D.consumed.k;
   // «Faltan» = objetivo − lo comido. Si lo que queda del plan no lo cubre exactamente (p. ej. en volumen solo se
   // recupera la mitad de las kcal perdidas, o ya no quedan comidas), se dice aparte para que las cifras cuadren.
   const pLeft = pT - pC, kLeft = kT - kC, hayPend = D.remainingPlan.k > 0;
