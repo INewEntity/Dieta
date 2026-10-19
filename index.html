@@ -152,7 +152,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 8;
+const VERSION = 9;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -555,23 +555,27 @@ function computeDay(k){
         if (got.k > 30) tips.push({cls:'', html:`He recuperado <b>la mitad de las calorías</b> que faltaban (fase de volumen) con algo más de hidratos. La otra mitad no hace falta.`});
       }
     } else if (net > 120){
-      let cut = net;
-      const g1 = scaleGroup(pending.map(m=>meals[m]), 'carb', -cut, 0.6); cut += g1.k;
-      let g2 = ZERO; if (cut > 40) { g2 = scaleGroup(pending.map(m=>meals[m]), 'grasa', -cut, 1); cut += g2.k; }
-      // si además sobra proteína, también se puede recortar, sin bajar del objetivo del día
-      let g3 = ZERO;
-      if (cut > 40){
-        const pendP = pending.reduce((a,m) => a + sumItems(meals[m].items).p, 0);
-        const spareP = consumed.p + pendP - target.p;
-        const protIt = pending.flatMap(m => meals[m].items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido));
-        const pk = protIt.reduce((a,it) => a + mac(it.id,it.g).k, 0), pp = protIt.reduce((a,it) => a + mac(it.id,it.g).p, 0);
-        if (spareP > 8 && pp > 0){ g3 = scaleGroup(pending.map(m=>meals[m]), 'prot', -Math.min(cut, spareP * pk / pp), 0.5); cut += g3.k; }
-      }
-      added = addM(added, addM(addM(g1, g2), g3));
-      const parts = ['hidratos'].concat(g2.k < 0 ? ['grasa'] : [], g3.k < 0 ? ['la proteína que ya te sobraba'] : []);
-      const what = parts.length > 1 ? parts.slice(0,-1).join(', ') + ' y ' + parts[parts.length-1] : parts[0];
-      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${what} de lo que queda${g3.k<0?' (sigues llegando a tu proteína)':', sin tocar la proteína'}.${cut > 150 ? ' No pasa nada: mañana, normal.' : ''}`});
+      const r = trimSurplus(pending.map(m => meals[m]), net, true);
+      added = addM(added, r.got);
+      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${r.what} de lo que queda${r.prot ? ' (sigues llegando a tu proteína)' : ', sin tocar la proteína'}.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
     }
+  }
+  // Recorta kcal de lo que queda, de lo más prescindible a lo menos: hidratos (dejando algo), grasa, fruta,
+  // la leche del batido, el resto de hidratos y, si se permite, la proteína que sobre del objetivo. Nunca la verdura.
+  function trimSurplus(ms, cut, conProteina){
+    let got = ZERO; const hecho = [];
+    const paso = (grp, frac, nombre) => { if (cut <= 30) return; const g = scaleGroup(ms, grp, -cut, frac); if (g.k < -5){ got = addM(got, g); cut += g.k; if (!hecho.includes(nombre)) hecho.push(nombre); } };
+    paso('carb', 0.6, 'hidratos'); paso('grasa', 1, 'grasa'); paso('fruta', 1, 'fruta'); paso('liq', 1, 'la leche del batido'); paso('carb', 1, 'hidratos');
+    let prot = false;
+    if (conProteina && cut > 30){
+      const pendP = ms.reduce((a, M) => a + sumItems(M.items).p, 0) + locked.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
+      const spareP = consumed.p + pendP - target.p;
+      const protIt = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido));
+      const pk = protIt.reduce((a,it) => a + mac(it.id,it.g).k, 0), pp = protIt.reduce((a,it) => a + mac(it.id,it.g).p, 0);
+      if (spareP > 8 && pp > 0){ const g = scaleGroup(ms, 'prot', -Math.min(cut, spareP * pk / pp), 0.5); got = addM(got, g); cut += g.k; prot = g.k < 0; if (prot) hecho.push('la proteína que te sobraba'); }
+    }
+    const what = hecho.length > 1 ? hecho.slice(0, -1).join(', ') + ' y ' + hecho[hecho.length - 1] : (hecho[0] || 'algo');
+    return {got, left: Math.max(0, cut), what, prot};
   }
   // 3) Cena tardía
   const late = toMin(S.settings.lateDinner);
@@ -593,6 +597,9 @@ function computeDay(k){
         gap -= got.p;
       });
     }
+    // lo que acaba de añadir la proteína no puede dejar el día por encima de las kcal: se compensa sin tocar la proteína
+    const over = consumed.k + pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items).k, 0) - target.k;
+    if (!minimo && over > 60) trimSurplus(pendLeft.map(m => meals[m]), over, false);
   }
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
