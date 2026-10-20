@@ -159,7 +159,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 13;
+const VERSION = 14;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -268,6 +268,11 @@ function linkUsaMacros(base, mid){
   if (!B || !F || LINK_SOLO_NOMBRE.has(base) || F.tal || F.q === 'b') return false;
   if (ESTADO_BASE[base] && F.s && F.s !== ESTADO_BASE[base]) return false;
   return Math.abs(F.k - B.k) / Math.max(B.k, 1) <= 0.4; // red de seguridad ante vínculos raros
+}
+// Nombre que se muestra: el producto de Mercadona vinculado si lo hay (la ensalada, que son tres productos, no)
+function dispName(id){
+  const F = FOODS[id]; if (!F) return id;
+  return FOODS_BASE[id] && F.brand && !LINK_SOLO_NOMBRE.has(id) ? F.brand : F.n;
 }
 function applyLinks(){
   for (const base of Object.keys(FOODS_BASE)){
@@ -503,6 +508,9 @@ function basePlan(k, sch, opts = {}){
       return Object.assign({}, it);
     });
   }
+  // Con intercambios o cosas que se acaban, el plan se desvía del objetivo: se vuelve a cuadrar aquí, para que
+  // el plan del día ya sume el objetivo y el motor no muestre «ajustes» cuando aún no se ha comido nada.
+  if (Object.values(plan).some(items => items.some(it => it.from))) fitToTarget(plan);
   return plan;
 }
 function consumedOf(log){
@@ -793,7 +801,7 @@ function mealCard(M, now){
   const macros = mt ? `<div class="mm num"><span><b>${R(mt.k)}</b> kcal</span><span><b>${R(mt.p)}</b> g P</span><span><b>${R(mt.c)}</b> g H</span><span><b>${R(mt.f)}</b> g G</span></div>` : '';
   let items = '';
   if (st !== 'pending' && st !== 'skipped'){
-    const rows = M.items.map(it => `<li><span>${esc(FOODS[it.id].n)}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`);
+    const rows = M.items.map(it => `<li><span>${esc(dispName(it.id))}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`);
     (M.log && M.log.extra || []).forEach(e => rows.push(`<li><span>${esc(e.n)}</span><span class="amt num">${R(e.g)} g · ${R(e.k)} kcal</span></li>`));
     if (M.log && M.log.other) rows.push(`<li><span>${esc(M.log.other.label)}</span><span class="amt num">${R(M.log.other.k)} kcal · ${R(M.log.other.p)} g prot.</span></li>`);
     if (rows.length) items = `<ul class="items">${rows.join('')}</ul>`;
@@ -803,9 +811,9 @@ function mealCard(M, now){
       const cls = it.added ? 'plus' : it.delta > 0 ? 'plus' : it.delta < 0 ? 'minus' : it.missing ? 'miss' : '';
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
       const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>' : '';
-      const name = esc(FOODS[it.id].n) + sub;
+      const name = esc(dispName(it.id)) + sub;
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
-      const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(FOODS[it.id].n)}">${d < 0 ? '−' : '+'}</button>`;
+      const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
       return st === 'pending' && !it.fromBatido
         ? `<li class="${cls}">${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<span class="amt num">${amt}</span>${stp(1)}</span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
@@ -911,7 +919,7 @@ function sheetEdit(m, init = null, mode = 'log'){
   const draw = el => {
     el.querySelector('#ed').innerHTML = items.map((it,i)=>{
       const F = FOODS[it.id], val = F.u ? Math.round(it.g/F.u) : R(it.g);
-      return `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(F.n)}</div>
+      return `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(dispName(it.id))}</div>
         <input type="number" inputmode="decimal" min="0" step="${F.u?1:5}" value="${val}" data-i="${i}" style="width:92px">
         <span class="muted" style="width:52px;font-size:13px">${F.u?F.un[1]:F.ml?'ml':'g'}</span>
         <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
@@ -1021,13 +1029,14 @@ function sheetSwap(m, i){
   const orig = base.id, origG = base.g;
   const grp = FOODS[orig].g;
   const alts = (ALTS[grp] || []).filter(a => FOODS[a].sec || a === 'agua');
-  sheet(`<h2>Cambiar ${esc(FOODS[it.id].n.toLowerCase())}</h2><div class="sub">Equivalencias de ${(GROUP_NAME[grp] || 'alimento').toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
+  sheet(`<h2>Cambiar ${esc(dispName(it.id).toLowerCase())}</h2><div class="sub">Equivalencias de ${(GROUP_NAME[grp] || 'alimento').toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
     <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = S.pantry[a]==='falta';
       return `<button class="opt ${a===it.id?'sel':''}" data-a="${a}" data-g="${g}"><span>${esc(FOODS[a].n)}${miss?' <span style="color:var(--coral);font-size:12px">(no hay)</span>':''}</span><span class="d num">${amount(a,g)}</span></button>`; }).join('')}</div>
-    <h3 class="sec">Más opciones de Mercadona</h3>
+    ${FOODS_BASE[orig] && !locked ? `<button class="opt" data-x="base" style="margin-top:10px"><span>🛒 Cambiar el producto en la dieta base</span><span class="d">todos los días</span></button>` : ''}
+    <h3 class="sec">Solo hoy: más opciones de Mercadona</h3>
     <input id="swq" type="search" placeholder="Busca o elige: pavo, sepia, tofu…" autocomplete="off">
     <div id="swres" class="stack" style="margin-top:8px"><div class="empty">Cargando productos…</div></div>
-    <div class="evactions"><button class="btn danger" data-x="falta">No tengo ${esc(FOODS[it.id].n.toLowerCase())}</button></div>`, el => {
+    <div class="evactions"><button class="btn danger" data-x="falta">No tengo ${esc(dispName(it.id).toLowerCase())}</button></div>`, el => {
     const drawMdb = () => {
       // sin búsqueda: primero lo que se parece al alimento original (variantes reales del mismo producto)
       const q = el.querySelector('#swq').value.trim() || FOODS[orig].n;
@@ -1053,6 +1062,7 @@ function sheetSwap(m, i){
         save(); closeSheet(); render(); return;
       }
       const x = e.target.closest('[data-x]');
+      if (x && x.dataset.x === 'base') return sheetLink(orig);
       if (x && x.dataset.x === 'falta'){ S.pantry[it.id] = 'falta'; if (day.swaps && day.swaps[m]) delete day.swaps[m][i]; save(); closeSheet(); render(); toast(FOODS[it.id].n + ' añadido a la lista de la compra'); }
     });
   });
@@ -1171,7 +1181,7 @@ async function aiAnalyze({m, items, text, photo, at}){
   const prods = cand.map(id => { const F = useMDB(id) || FOODS[id]; const o = {id, nombre:F.n, por_100:{kcal:F.k, p:F.p, c:F.c, f:F.f}};
     if (F.ml) o.liquido = true; if (F.u) o.unidad_g = F.u; if (F.tal) o.sin_escurrir = true; return o; });
   const ctx = {comida: MEAL_NAME[m], hora_actual: fmt(nowMin()), hora_elegida_en_la_app: fmt(at),
-    plan_de_esta_comida: items.map(it => ({id: it.id, alimento: FOODS[it.id].n, g: R(it.g)})),
+    plan_de_esta_comida: items.map(it => ({id: it.id, alimento: dispName(it.id), g: R(it.g)})),
     productos_mercadona: prods};
   const content = [];
   if (photo) content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}});
@@ -1331,7 +1341,7 @@ async function coachAsk(m, pregunta, previa){
     objetivo_del_dia: macrosTxt(C.T), comido_hoy: macrosTxt(C.D.consumed),
     otras_comidas_pendientes_aportan: macrosTxt(C.otras),
     a_cubrir_en_esta_comida: macrosTxt(C.cubrir),
-    esta_comida_ahora: C.M.items.filter(x => !x.fromBatido).map(x => ({id:x.id, alimento:FOODS[x.id].n, g:R(x.g)})),
+    esta_comida_ahora: C.M.items.filter(x => !x.fromBatido).map(x => ({id:x.id, alimento:dispName(x.id), g:R(x.g)})),
     despensa_en_casa: casa.map(id => foodRow(id, true)),
     productos_mercadona: merc.map(id => foodRow(id, false)),
   };
@@ -1361,7 +1371,7 @@ function sheetCoach(m){
       el.querySelector('#cres').innerHTML = `<ul class="tips"><li>${esc(L.r.respuesta || '')}</li></ul>` + L.r.opciones.map((o, i) => {
         const t = sumItems(o.items), cu = L.C.cubrir;
         return `<div class="card" style="margin-bottom:10px"><div class="evname" style="margin-bottom:4px">${esc(o.titulo)}</div>
-          <ul class="items">${o.items.map(it => `<li><span>${enCasa(it.id) ? '🏠' : '🛒'} ${esc(FOODS[it.id].n)}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`).join('')}</ul>
+          <ul class="items">${o.items.map(it => `<li><span>${enCasa(it.id) ? '🏠' : '🛒'} ${esc(dispName(it.id))}</span><span class="amt num">${amount(it.id, it.g)}</span></li>`).join('')}</ul>
           <div class="macroline num">Total: ${R(t.k)} kcal · ${R(t.p)} g P · ${R(t.c)} g H · ${R(t.f)} g G <span class="muted">(objetivo de la comida: ${R(cu.k)} kcal · ${R(cu.p)} g P)</span></div>
           ${o.explicacion ? `<div class="evnote">${esc(o.explicacion)}</div>` : ''}
           ${(() => { // aviso si la opción no cuadra con lo que debería aportar la comida
@@ -1473,7 +1483,7 @@ function renderCompra(){
 }
 function sheetLink(base){
   const B = FOODS[base], grp = B.g;
-  sheet(`<h2>Vincular ${esc(B.n.toLowerCase())}</h2><div class="sub">El producto de Mercadona que compras para esto. Si es comparable, el plan usará los macros de su etiqueta.</div>
+  sheet(`<h2>${esc(B.n)} en tu dieta base</h2><div class="sub">Elige el producto de Mercadona que compras para esto. <b>Cambia en todos los días</b>, no solo hoy. Si es comparable, el plan usa los macros de su etiqueta.</div>
     <div id="lkres" class="stack"><div class="empty">Cargando…</div></div>
     <label class="f">Buscar otro</label><input id="lkq" type="search" placeholder="Busca en Mercadona…" autocomplete="off">
     <div class="evactions"><button class="btn ghost" data-x="none">Sin vincular (valores genéricos)</button></div>`, el => {
@@ -1619,6 +1629,12 @@ function renderAjustes(){
     Datos nutricionales: <a href="https://world.openfoodfacts.org" style="color:inherit">Open Food Facts</a> (licencia ODbL), BEDCA (AESAN) y USDA FoodData Central. Catálogo: tienda.mercadona.es. Si un dato no cuadra con la etiqueta, manda la etiqueta.</div>
   </div>
   <div class="card">
+    <label class="f" style="margin-top:0">🥗 Tu dieta base en Mercadona</label>
+    <div class="muted" style="font-size:13px;margin-bottom:6px">El producto que compras para cada alimento de tu dieta. Cambiarlo aquí afecta a <b>todos los días</b>; para cambiar algo solo un día, tócalo en la comida.</div>
+    <div class="list">${Object.keys(weeklyNeeds()).filter(id => FOODS[id] && FOODS[id].sec).map(id => `<button class="li" data-act="link" data-id="${id}" style="width:100%;text-align:left;padding-left:0;padding-right:0">
+      <div class="n">${esc(FOODS[id].n)}<div class="q" style="color:var(--lime-ink)">🛒 ${FOODS[id].brand ? esc(FOODS[id].brand) + (FOODS[id].brandMacros ? '' : ' · solo el nombre') : 'Sin vincular (valores genéricos)'}</div></div><span class="muted">›</span></button>`).join('')}</div>
+  </div>
+  <div class="card">
     <label class="f" style="margin-top:0">Copia de seguridad</label>
     <div class="evactions" style="margin-top:0"><button class="btn" data-act="export">Exportar</button><label class="btn" style="cursor:pointer">Importar<input type="file" accept="application/json" id="imp" hidden></label></div>
   </div>
@@ -1698,7 +1714,7 @@ async function syncSchedule(force, extra = []){
   }catch(_){ return false; }
 }
 function epochAt(k, min){ const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d, 0, Math.round(min)).getTime(); }
-const lowerName = id => /^[A-ZÁÉÍÓÚ]{2,}/.test(FOODS[id].n) ? FOODS[id].n : FOODS[id].n.toLowerCase();
+const lowerName = id => { const n = dispName(id); return /^[A-ZÁÉÍÓÚ]{2,}/.test(n) ? n : n.toLowerCase(); };
 function cookList(items){
   return items.filter(it => it.g > 0 && FOODS[it.id].g !== 'fruta' && FOODS[it.id].g !== 'liq')
     .map(it => FOODS[it.id].u ? amount(it.id, it.g) : `${amount(it.id, it.g)} de ${lowerName(it.id)}`).join(', ');
@@ -1733,7 +1749,7 @@ function buildNotifications(){
     if (av.comidas) for (const m of D.sch.order){
       const M = D.meals[m];
       if (M.status !== 'pending' || M.merged || (m === 'desayuno' && breakfastMerged)) continue;
-      if (m === 'merienda') out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t), title:'🥤 Hora del batido', body:M.items.map(it => `${amount(it.id, it.g)} de ${FOODS[it.id].n.toLowerCase()}`).join(', ') + '.', tag:'comida', url:'#hoy'});
+      if (m === 'merienda') out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t), title:'🥤 Hora del batido', body:M.items.map(it => `${amount(it.id, it.g)} de ${dispName(it.id).toLowerCase()}`).join(', ') + '.', tag:'comida', url:'#hoy'});
       else out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t - 30), title:`🍳 ${MEAL_NAME[m]} a las ${fmt(M.t)}`,
         body:`Iría bien ir empezando a cocinar: ${cookList(M.items)}.${M.notes.length ? ' Lleva ajustes por lo de hoy.' : ''}`, tag:'comida', url:'#hoy'});
     }
@@ -1795,6 +1811,8 @@ function tabFromHash(){ const h = location.hash.slice(1); if (['hoy','compra','p
 window.addEventListener('hashchange', () => { tabFromHash(); render(); });
 tabFromHash();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+// Si la dieta base aún no está vinculada a Mercadona, la base se carga en segundo plano y se vincula sola
+if (Object.keys(S.link || {}).length < Object.keys(FOODS_BASE).length - 3) setTimeout(() => loadMDB().then(() => render()).catch(() => {}), 1200);
 render();
 </script>
 </body>
