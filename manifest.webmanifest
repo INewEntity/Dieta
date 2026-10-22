@@ -3,6 +3,7 @@
   "short_name": "Dieta",
   "description": "Tu dieta con ajustes inteligentes a lo largo del día.",
   "lang": "es",
+  "id": "./index.html",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

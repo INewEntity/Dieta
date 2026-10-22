@@ -86,6 +86,7 @@ header.top .sub{color:var(--muted);font-size:14px}
 .items .qty{display:flex;align-items:center;gap:6px;flex:0 0 auto}
 .items .stp{flex:0 0 auto;width:30px;height:30px;border-radius:9px;background:var(--card2);border:1px solid var(--line);font-size:18px;font-weight:800;line-height:1;display:grid;place-items:center;color:var(--text);padding:0}
 .items .stp:active{background:var(--lime);color:var(--on-lime)}
+.items .qamt{padding:4px 2px;text-decoration:underline dotted;text-underline-offset:3px}
 .stp-reset{color:var(--lime-ink);font-weight:700;font-size:13px;padding:0;margin-left:4px;text-decoration:underline}
 .evnote{font-size:13px;color:var(--muted);margin-top:8px}
 .evnote b{color:var(--text)}
@@ -159,7 +160,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 15;
+const VERSION = 16;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -851,7 +852,7 @@ function mealCard(M, now){
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
       const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
       return st === 'pending' && !it.fromBatido
-        ? `<li class="${cls}">${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<span class="amt num">${amt}</span>${stp(1)}</span></li>`
+        ? `<li class="${cls}">${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<button class="amt num qamt" data-act="qtyset" data-m="${M.key}" data-i="${i}" aria-label="Escribir la cantidad de ${esc(dispName(it.id))}">${amt}</button>${stp(1)}</span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
     }).join('')}</ul>`;
   const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}</div>` : '';
@@ -877,6 +878,26 @@ function changeQty(m, i, dir){
   it.g = Math.max(0, FOODS[it.id].u ? Math.round(it.g / step) * step + dir * step : Math.round((it.g + dir * step) / 5) * 5);
   if (it.g <= 0){ items.splice(i, 1); toast(FOODS[it.id].n + ' quitado de esta comida'); }
   save(); render();
+}
+// Tocar la cantidad: escribirla exacta (en gramos/ml, o en unidades si el alimento va por piezas)
+function sheetQty(m, i){
+  const it = planItems(m)[i]; if (!it) return;
+  const F = FOODS[it.id], uni = F.u ? F.un[1] : F.ml ? 'ml' : 'g';
+  sheet(`<h2>${esc(dispName(it.id))}</h2><div class="sub">${MEAL_NAME[m]}: cantidad exacta. El resto del día se recoloca.</div>
+    <div class="row"><input id="qv" type="number" inputmode="decimal" min="0" step="${F.u ? 1 : 1}" value="${F.u ? Math.round(it.g / F.u) : R(it.g)}" style="flex:1"><span class="muted">${uni}</span></div>
+    <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    const inp = el.querySelector('#qv'); inp.focus(); inp.select();
+    const ok = () => {
+      const v = parseFloat(String(inp.value).replace(',', '.'));
+      if (!(v >= 0)) return toast('Escribe un número');
+      const items = planItems(m);
+      if (v === 0){ items.splice(i, 1); toast(F.n + ' quitado de esta comida'); }
+      else items[i].g = F.u ? Math.round(v) * F.u : Math.round(v);
+      save(); closeSheet(); render();
+    };
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
+    el.addEventListener('click', e => { const x = e.target.closest('[data-x]'); if (!x) return; if (x.dataset.x === 'ok') ok(); else closeSheet(); });
+  });
 }
 function logMeal(m, status, extra = {}){
   const k = viewDay(), day = getDay(k), D = computeDay(k);
@@ -1810,6 +1831,7 @@ app.addEventListener('click', async e => {
   else if (a === 'undo'){ const day = getDay(viewDay()); const prev = day.meals[m]; delete day.meals[m]; if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
   else if (a === 'swap') sheetSwap(m, +b.dataset.i);
   else if (a === 'qty') changeQty(m, +b.dataset.i, +b.dataset.d);
+  else if (a === 'qtyset') sheetQty(m, +b.dataset.i);
   else if (a === 'coach') sheetCoach(m);
   else if (a === 'dayprev'){ VIEW = addDays(viewDay(), -1); window.scrollTo(0,0); render(); }
   else if (a === 'daynext'){ const n = addDays(viewDay(), 1); VIEW = n >= dayKey() ? null : n; window.scrollTo(0,0); render(); }
