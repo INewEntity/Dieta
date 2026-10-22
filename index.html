@@ -160,7 +160,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 16;
+const VERSION = 17;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -936,26 +936,19 @@ function sheetMore(m){
   const k = viewDay(), D = computeDay(k), M = D.meals[m];
   sheet(`<h2>${MEAL_NAME[m]}</h2><div class="sub">Prevista a las ${fmt(M.t)}</div>
   <div class="stack">
-    <button class="opt sel" data-x="coach"><span>✨ ¿Cómo completo lo que me falta?</span><span class="d">con lo que tienes</span></button>
-    <button class="opt" data-x="ai"><span>✨ Cuéntale a la IA qué has comido</span><span class="d">texto o foto</span></button>
-    <button class="opt" data-x="at"><span>✓ Hecha a otra hora</span><span class="d">elige la hora</span></button>
-    <button class="opt" data-x="plan"><span>🗓️ Planificar cambios</span><span class="d">sin marcarla como hecha</span></button>
-    <button class="opt" data-x="edit"><span>✏️ Hecha con cambios</span><span class="d">lo que comiste de verdad</span></button>
-    <button class="opt" data-x="scan"><span>📷 Escanear lo que he comido</span><span class="d">código de barras</span></button>
-    <button class="opt" data-x="other"><span>🍽️ Comí otra cosa / fuera</span><span class="d">ligero, normal, copioso…</span></button>
+    <button class="opt" data-x="other"><span>🍽️ Comí otra cosa</span><span class="d">IA (texto o foto) o estimación</span></button>
+    <button class="opt" data-x="plan"><span>➕ Añadir un alimento</span><span class="d">buscar o escanear</span></button>
+    <button class="opt" data-x="at"><span>🕐 Hecha a otra hora</span><span class="d">elige la hora</span></button>
     <button class="opt" data-x="skip"><span>⏭️ Me la salto</span><span class="d">se recoloca el resto</span></button>
   </div>
+  <div class="muted" style="font-size:13px;margin-top:10px">¿Comiste lo del plan con cambios? Ajusta las cantidades en la tarjeta (−/+ o tocando el número) y dale a <b>Hecha</b>.</div>
   <div id="atbox" hidden><label class="f">¿A qué hora?</label><div class="row">${timeInput('at', Math.min(nowFor(viewDay()), M.t))}<button class="btn pri" data-x="atok">Guardar</button></div></div>`, el => {
     el.addEventListener('click', e => {
       const x = e.target.closest('[data-x]'); if (!x) return;
       const a = x.dataset.x;
-      if (a === 'ai') sheetAI(m);
-      if (a === 'coach') sheetCoach(m);
       if (a === 'at') el.querySelector('#atbox').hidden = false;
       if (a === 'atok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'done', {at:t}); }
-      if (a === 'edit') sheetEdit(m);
       if (a === 'plan') sheetEdit(m, null, 'plan');
-      if (a === 'scan') sheetScan(id => sheetEdit(m, M.items.map(x => ({id:x.id, g:x.g})).concat({id, g:FOODS[id].u || 100})), 'Se añade a lo previsto; quita lo que no hayas comido.');
       if (a === 'other') sheetOther(m);
       if (a === 'skip'){ closeSheet(); logMeal(m, 'skipped'); }
     });
@@ -982,7 +975,7 @@ function sheetEdit(m, init = null, mode = 'log'){
         <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
     sum(el);
   };
-  sheet(`<h2>${plan ? 'Planificar ' + MEAL_NAME[m].toLowerCase() : MEAL_NAME[m] + ' con cambios'}</h2><div class="sub">${plan ? 'Ajusta lo que vas a comer. No se marca como hecha: el resto del día se recoloca con esto.' : 'Pon lo que has comido de verdad.'}</div>
+  sheet(`<h2>${plan ? MEAL_NAME[m] + ': añadir alimentos' : MEAL_NAME[m] + ' con cambios'}</h2><div class="sub">${plan ? 'Busca o escanea lo que quieras añadir. No se marca como hecha: el resto del día se recoloca con esto.' : 'Pon lo que has comido de verdad.'}</div>
     <div id="ed"></div>
     <label class="f">Añadir alimento</label>
     <div class="row"><input id="addq" type="search" placeholder="Busca: pavo, yogur proteínas, tortitas…" autocomplete="off"><button class="btn sm" data-x="scan" aria-label="Escanear código">📷</button></div>
@@ -991,6 +984,7 @@ function sheetEdit(m, init = null, mode = 'log'){
     ${plan ? '' : `<label class="f">Hora</label>${timeInput('at', Math.min(nowFor(viewDay()), D.meals[m].t))}`}
     <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="ok">${plan ? 'Aplicar al plan' : 'Guardar'}</button></div>`, el => {
     draw(el);
+    if (plan) el.querySelector('#addq').focus();
     const showRes = () => { const q = el.querySelector('#addq').value.trim(); if (!q){ el.querySelector('#addres').innerHTML = ''; return; } foodResults(el, '#addres', searchFoods(q, {limit:12})); };
     loadMDB().then(showRes).catch(() => {});
     el.querySelector('#addq').addEventListener('input', showRes);
