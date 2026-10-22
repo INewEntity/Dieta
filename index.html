@@ -159,7 +159,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 14;
+const VERSION = 15;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -464,9 +464,9 @@ function schedule(k){
 function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
 // Escala el plan del día al objetivo: primero la proteína, luego hidratos y grasa.
 // Fruta y verdura no se tocan. El batido (días de entreno) entra dentro del total.
-function fitToTarget(plan){
+function fitToTarget(plan, kT = kcalBase()){
   const all = Object.values(plan).flat();
-  const kT = +S.settings.kcal || 2500, pT = +S.settings.prot || 160;
+  const pT = +S.settings.prot || 160;
   const prot = all.filter(it => FOODS[it.id].g === 'prot');
   const pProt = prot.reduce((a,it) => a + mac(it.id, it.g).p, 0), pOther = sumItems(all).p - pProt;
   if (pProt > 0){ const sp = Math.max(0.6, Math.min(1.5, (pT - pOther) / pProt)); prot.forEach(it => it.g = roundG(it.id, it.g * sp)); }
@@ -489,7 +489,8 @@ function basePlan(k, sch, opts = {}){
   const wd = keyToDate(k).getDay(), day = getDay(k);
   const plan = {desayuno:mkItems(DESAYUNO), almuerzo:mkItems(WEEK[wd].almuerzo), cena:mkItems(WEEK[wd].cena)};
   if (sch.tr.on) plan.merienda = mkItems(BATIDO);
-  fitToTarget(plan);
+  const kT = dayKcal(k).k;
+  fitToTarget(plan, kT);
   if (opts.noSwaps) return plan;
   for (const m in plan){
     const sw = (day.swaps || {})[m] || {};
@@ -510,8 +511,38 @@ function basePlan(k, sch, opts = {}){
   }
   // Con intercambios o cosas que se acaban, el plan se desvía del objetivo: se vuelve a cuadrar aquí, para que
   // el plan del día ya sume el objetivo y el motor no muestre «ajustes» cuando aún no se ha comido nada.
-  if (Object.values(plan).some(items => items.some(it => it.from))) fitToTarget(plan);
+  if (Object.values(plan).some(items => items.some(it => it.from))) fitToTarget(plan, kT);
   return plan;
+}
+
+/* ===================== Compensación entre días ===================== */
+// Lo que te pasas (o te quedas corto) un día se compensa a medias en los 3 días siguientes: la mitad, repartida,
+// con un tope de −250 kcal/día (o +150 si te quedaste corto: en volumen no hace falta recuperarlo todo).
+// La proteína no se toca. Solo cuentan los días con desayuno, almuerzo y cena registrados, y el exceso se mide
+// contra el objetivo que tenía ese día (ya compensado), para no devolver lo que ya se había compensado.
+const COMP = {dias:3, frac:0.5, min:-250, max:150, ruido:150};
+const kcalBase = () => +S.settings.kcal || 2500;
+const dayComplete = k => !dayIsEmpty(S.days[k]) && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
+const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0);
+// → {k: objetivo del día, adj: compensación, src: [{k, e}] días que la causan}
+function dayKcal(k){
+  const base = kcalBase(), adj = {}, exc = {};
+  for (let i = 3 * COMP.dias; i >= 0; i--){
+    const j = addDays(k, -i);
+    let a = 0;
+    for (let d = 1; d <= COMP.dias; d++){ const e = exc[addDays(j, -d)]; if (e) a -= e * COMP.frac / COMP.dias; }
+    adj[j] = Math.round(Math.max(COMP.min, Math.min(COMP.max, a)) / 10) * 10;
+    if (i > 0 && dayComplete(j)){ const e = consumedK(j) - (base + adj[j]); if (Math.abs(e) >= COMP.ruido) exc[j] = e; }
+  }
+  const src = [];
+  for (let d = COMP.dias; d >= 1; d--){ const j = addDays(k, -d); if (exc[j]) src.push({k:j, e:exc[j]}); }
+  return {k: base + adj[k], adj: adj[k], src};
+}
+// Media de lo comido en los últimos 7 días completos (sin hoy)
+function weekKcal(){
+  const ks = [];
+  for (let i = 1; i <= 7; i++){ const k = addDays(dayKey(), -i); if (dayComplete(k)) ks.push(k); }
+  return {n: ks.length, avg: ks.length ? ks.reduce((a, k) => a + consumedK(k), 0) / ks.length : 0};
 }
 function consumedOf(log){
   if (!log || log.status === 'pending' || log.status === 'skipped') return ZERO;
@@ -548,10 +579,15 @@ function computeDay(k){
     meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
   }
   // objetivos del día: los de Ajustes (la suma del plan puede desviarse algo con intercambios y redondeos)
-  const TK = +S.settings.kcal || target.k, TP = +S.settings.prot || target.p;
+  const comp = dayKcal(k), TK = comp.k, TP = +S.settings.prot || target.p;
   const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged && !meals[m].locked);
   const locked = sch.order.filter(m => meals[m].locked);
   const tips = [];
+  if (comp.adj){
+    const dias = comp.src.map(s => `el ${DAYS_LONG[keyToDate(s.k).getDay()]} ${s.e > 0 ? 'te pasaste' : 'te quedaste corto'} ${R(Math.abs(s.e))} kcal`);
+    const lista = dias.length > 1 ? dias.slice(0, -1).join(', ') + ' y ' + dias[dias.length - 1] : dias[0];
+    tips.push({cls:'', html:`Objetivo de este día: <b>${R(TK)} kcal</b> (${comp.adj > 0 ? '+' : '−'}${Math.abs(comp.adj)}), porque ${lista}. Compenso la mitad en 3 días; la proteína no cambia.`});
+  }
   let added = ZERO;
 
   // 1) Proteína: recuperar lo que falte
@@ -639,7 +675,7 @@ function computeDay(k){
   if (minimo) tips.unshift({cls:'amber', html:'<b>Día mínimo</b>: el único objetivo de hoy es llegar a la proteína. Lo demás, lo que puedas.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
-  return {k, sch, meals, target, consumed, remainingPlan, tips, minimo, bal};
+  return {k, sch, meals, target, consumed, remainingPlan, tips, minimo, bal, TK, comp};
 }
 function computeSchedule(k){ return schedule(k); }
 
@@ -728,7 +764,7 @@ function renderHoy(){
   if (!existed && dayIsEmpty(day)) delete S.days[k]; // mirar un día no lo crea
   const d = keyToDate(k);
   // el objetivo que se ve es el de Ajustes; el plan del día queda a ±15 kcal y ±1 g de él tras el ajuste fino
-  const pT = +S.settings.prot || D.target.p, pC = D.consumed.p, kT = +S.settings.kcal || D.target.k, kC = D.consumed.k;
+  const pT = +S.settings.prot || D.target.p, pC = D.consumed.p, kT = D.TK, kC = D.consumed.k;
   // «Faltan» = objetivo − lo comido. Si lo que queda del plan no lo cubre exactamente (p. ej. en volumen solo se
   // recupera la mitad de las kcal perdidas, o ya no quedan comidas), se dice aparte para que las cifras cuadren.
   const pLeft = pT - pC, kLeft = kT - kC, hayPend = D.remainingPlan.k > 0;
@@ -1286,7 +1322,7 @@ function sheetAIReview(m, r, at){
 const enCasa = id => S.pantry[id] !== 'falta' && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
 function coachContext(m){
   const D = computeDay(viewDay()), M = D.meals[m];
-  const T = {k: +S.settings.kcal || D.target.k, p: +S.settings.prot || D.target.p, c: D.target.c, f: D.target.f};
+  const T = {k: D.TK, p: +S.settings.prot || D.target.p, c: D.target.c, f: D.target.f};
   const otras = D.sch.order.filter(x => x !== m && D.meals[x].status === 'pending' && !D.meals[x].merged)
     .reduce((a, x) => addM(a, sumItems(D.meals[x].items)), ZERO);
   const cubrir = addM(addM(T, D.consumed, -1), otras, -1);
@@ -1543,14 +1579,14 @@ function renderProgreso(){
 }
 // Días anteriores con algo registrado (los 30 últimos): lo comido frente al objetivo. Tocar uno lo abre en «Hoy».
 function historial(){
-  const hoy = dayKey(), TK = +S.settings.kcal, TP = +S.settings.prot;
+  const hoy = dayKey(), TP = +S.settings.prot;
   const ks = Object.keys(S.days).filter(k => k < hoy && !dayIsEmpty(S.days[k])).sort().reverse().slice(0, 30);
   if (!ks.length) return `<div class="empty">Aún no hay días anteriores. Desde mañana verás aquí cada día; también puedes usar las flechas ‹ › en Hoy.</div>`;
   return ks.map(k => {
     const D = computeDay(k), d = keyToDate(k);
     const ord = D.sch.order.filter(m => !D.meals[m].merged), reg = ord.filter(m => D.meals[m].status !== 'pending').length;
     const ok = x => x ? 'color:var(--lime-ink)' : 'color:var(--amber)';
-    const kOk = Math.abs(D.consumed.k - TK) <= TK * 0.08, pOk = D.consumed.p >= TP * 0.9;
+    const kOk = Math.abs(D.consumed.k - D.TK) <= D.TK * 0.08, pOk = D.consumed.p >= TP * 0.9;
     return `<button class="li" data-act="openday" data-k="${k}" style="width:100%;text-align:left">
       <div class="n">${DAYS_LONG[d.getDay()][0].toUpperCase() + DAYS_LONG[d.getDay()].slice(1)} ${d.getDate()} ${MONTHS[d.getMonth()]}
         <div class="q num">${reg}/${ord.length} comidas registradas${S.days[k].minimo ? ' · día mínimo' : ''}${D.sch.tr.on ? ' · 🏋️' : ''}</div></div>
@@ -1572,7 +1608,8 @@ function adherence(){
   const {days, protDays, pct} = adherenceStats();
   if (!days) return `<div class="empty">Aún no hay días registrados.</div>`;
   return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
-    <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>`;
+    <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>
+    ${(w => w.n ? `<div class="small" style="margin-top:10px">Media de calorías: <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} con las 3 comidas principales registradas.</div>` : '')(weekKcal())}`;
 }
 function chart(keys){
   const W = 520, H = 150, P = 18;
