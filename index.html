@@ -160,7 +160,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 17;
+const VERSION = 18;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -498,12 +498,12 @@ function basePlan(k, sch, opts = {}){
     plan[m] = plan[m].map((it, i) => {
       const to = sw[i] && sw[i].id;
       if (to && to !== it.id) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
-      if (S.pantry[it.id] === 'falta'){
+      if (noHay(it.id)){
         // primero algo del mismo grupo que tengas en casa (despensa), luego los alimentos base
         const g = FOODS[it.id].g, key = GROUP_KEY[g] || 'k';
-        const enCasa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === g && S.pantry[id] !== 'falta' && FOODS[id][key] > 0)
+        const enCasa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === g && !noHay(id) && FOODS[id][key] > 0)
           .sort((a, b) => S.despensa[b] - S.despensa[a]);
-        const alt = enCasa[0] || (ALTS[g] || []).find(a => a !== it.id && S.pantry[a] !== 'falta' && (FOODS[a].sec || a === 'agua'));
+        const alt = enCasa[0] || (ALTS[g] || []).find(a => a !== it.id && !noHay(a) && (FOODS[a].sec || a === 'agua'));
         if (alt) return {id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'};
         return Object.assign({}, it, {missing:true});
       }
@@ -545,6 +545,8 @@ function weekKcal(){
   for (let i = 1; i <= 7; i++){ const k = addDays(dayKey(), -i); if (dayComplete(k)) ks.push(k); }
   return {n: ks.length, avg: ks.length ? ks.reduce((a, k) => a + consumedK(k), 0) / ks.length : 0};
 }
+// «falta» = se acabó (va a la lista de la compra); «fuera» = quitado de la despensa (no lo compras): el plan lo cambia
+const noHay = id => S.pantry[id] === 'falta' || S.pantry[id] === 'fuera';
 function consumedOf(log){
   if (!log || log.status === 'pending' || log.status === 'skipped') return ZERO;
   let t = sumItems(log.items || []);
@@ -1081,38 +1083,40 @@ function sheetSwap(m, i){
   const grp = FOODS[orig].g;
   const alts = (ALTS[grp] || []).filter(a => FOODS[a].sec || a === 'agua');
   sheet(`<h2>Cambiar ${esc(dispName(it.id).toLowerCase())}</h2><div class="sub">Equivalencias de ${(GROUP_NAME[grp] || 'alimento').toLowerCase()} con la misma cantidad de ${({p:'proteína',c:'hidratos',f:'grasa'})[GROUP_KEY[grp]] || 'volumen'}.</div>
-    <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = S.pantry[a]==='falta';
+    <div class="stack">${alts.map(a=>{ const g = a === orig ? origG : equiv(orig, origG, a); const miss = noHay(a);
       return `<button class="opt ${a===it.id?'sel':''}" data-a="${a}" data-g="${g}"><span>${esc(FOODS[a].n)}${miss?' <span style="color:var(--coral);font-size:12px">(no hay)</span>':''}</span><span class="d num">${amount(a,g)}</span></button>`; }).join('')}</div>
     ${FOODS_BASE[orig] && !locked ? `<button class="opt" data-x="base" style="margin-top:10px"><span>🛒 Cambiar el producto en la dieta base</span><span class="d">todos los días</span></button>` : ''}
     <h3 class="sec">Solo hoy: más opciones de Mercadona</h3>
-    <input id="swq" type="search" placeholder="Busca o elige: pavo, sepia, tofu…" autocomplete="off">
+    <div class="row"><input id="swq" type="search" placeholder="Busca o elige: pavo, sepia, tofu…" autocomplete="off"><button class="btn sm" data-x="scan" aria-label="Escanear un producto">📷</button></div>
     <div id="swres" class="stack" style="margin-top:8px"><div class="empty">Cargando productos…</div></div>
     <div class="evactions"><button class="btn danger" data-x="falta">No tengo ${esc(dispName(it.id).toLowerCase())}</button></div>`, el => {
     const drawMdb = () => {
       // sin búsqueda: primero lo que se parece al alimento original (variantes reales del mismo producto)
       const q = el.querySelector('#swq').value.trim() || FOODS[orig].n;
       // lo que tienes en casa del mismo grupo va primero (🏠)
-      const enCasa = el.querySelector('#swq').value.trim() ? [] : Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === grp && S.pantry[id] !== 'falta');
+      const enCasa = el.querySelector('#swq').value.trim() ? [] : Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === grp && !noHay(id));
       const ids = enCasa.concat(searchFoods(q, {group:grp, limit:20, base:false})).filter((v, j, a) => a.indexOf(v) === j)
         .filter(id => { const F = useMDB(id) || FOODS[id]; return F && F.q !== 'b' && F[GROUP_KEY[grp] || 'k'] > 0; });
       foodResults(el, '#swres', ids, id => amount(id, equiv(orig, origG, id)));
     };
     loadMDB().then(drawMdb).catch(() => { el.querySelector('#swres').innerHTML = '<div class="empty">Sin conexión: la base de Mercadona se descarga la primera vez que la usas.</div>'; });
     el.querySelector('#swq').addEventListener('input', () => { if (MDB) drawMdb(); });
+    const day = getDay(k);
+    const apply = to => {
+      if (locked){ const pe = planItems(m); if (pe[i]) pe[i] = {id:to, g:equiv(orig, origG, to)}; if (FOODS[to].mid) keepFood(to); }
+      else {
+        day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
+        if (to === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:to}; keepFood(to); }
+      }
+      save(); closeSheet(); render();
+    };
     el.addEventListener('click', e => {
-      const day = getDay(k);
       const pick = e.target.closest('[data-pick]');
       const a = e.target.closest('[data-a]') || (pick && {dataset:{a:pick.dataset.pick}});
-      if (a){
-        const to = a.dataset.a;
-        if (locked){ const pe = planItems(m); if (pe[i]) pe[i] = {id:to, g:equiv(orig, origG, to)}; if (FOODS[to].mid) keepFood(to); }
-        else {
-          day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
-          if (to === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:to}; keepFood(to); }
-        }
-        save(); closeSheet(); render(); return;
-      }
+      if (a) return apply(a.dataset.a);
       const x = e.target.closest('[data-x]');
+      // escanear: se cambia por lo escaneado, con la cantidad equivalente en el macro principal del grupo
+      if (x && x.dataset.x === 'scan') return sheetScan(to => { apply(to); const nu = computeDay(k).meals[m].items[i]; toast(`${FOODS[orig].n} → ${FOODS[to].n}` + (nu && nu.id === to ? ` (${amount(to, nu.g)})` : '')); }, 'Se cambia por la cantidad equivalente.');
       if (x && x.dataset.x === 'base') return sheetLink(orig);
       if (x && x.dataset.x === 'falta'){ S.pantry[it.id] = 'falta'; if (day.swaps && day.swaps[m]) delete day.swaps[m][i]; save(); closeSheet(); render(); toast(FOODS[it.id].n + ' añadido a la lista de la compra'); }
     });
@@ -1334,7 +1338,7 @@ function sheetAIReview(m, r, at){
 // Para una comida pendiente: la IA propone 1–3 versiones completas de esa comida que cuadran el día,
 // usando primero lo que hay en casa y, si hace falta, productos de Mercadona. Cada opción se puede aplicar
 // a la comida (cantidades fijadas, sin marcarla como hecha) y el resto del día se recoloca.
-const enCasa = id => S.pantry[id] !== 'falta' && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
+const enCasa = id => !noHay(id) && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
 function coachContext(m){
   const D = computeDay(viewDay()), M = D.meals[m];
   const T = {k: D.TK, p: +S.settings.prot || D.target.p, c: D.target.c, f: D.target.f};
@@ -1493,7 +1497,8 @@ function weeklyNeeds(){
 let despQuery = '';
 function renderCompra(){
   const need = weeklyNeeds();
-  const baseIds = Object.keys(FOODS_BASE).filter(id => FOODS[id].sec && (need[id] || S.pantry[id] === 'falta'));
+  const baseIds = Object.keys(FOODS_BASE).filter(id => FOODS[id].sec && S.pantry[id] !== 'fuera' && (need[id] || S.pantry[id] === 'falta'));
+  const quitados = Object.keys(FOODS_BASE).filter(id => S.pantry[id] === 'fuera');
   const extra = Object.keys(S.despensa || {}).filter(id => FOODS[id]).sort((a, b) => FOODS[a].n.localeCompare(FOODS[b].n));
   const falta = baseIds.concat(extra).filter(id => S.pantry[id] === 'falta');
   const bySec = {}; baseIds.forEach(id => (bySec[FOODS[id].sec] = bySec[FOODS[id].sec] || []).push(id));
@@ -1512,8 +1517,10 @@ function renderCompra(){
   for (const sec of Object.keys(bySec).sort()){
     h += `<h3 class="sec">${esc(sec)}</h3><div class="card list" style="padding:4px 0">` + bySec[sec].map(id =>
       `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)}</div>
-        <button class="q" data-act="link" data-id="${id}" style="padding:2px 0;color:var(--lime-ink);text-align:left">🛒 ${FOODS[id].brand ? esc(FOODS[id].brand) : (S.link && id in S.link ? 'Sin vincular' : 'Vincular con Mercadona')} ›</button></div>${tog(id)}</div>`).join('') + `</div>`;
+        <button class="q" data-act="link" data-id="${id}" style="padding:2px 0;color:var(--lime-ink);text-align:left">🛒 ${FOODS[id].brand ? esc(FOODS[id].brand) : (S.link && id in S.link ? 'Sin vincular' : 'Vincular con Mercadona')} ›</button></div>${tog(id)}<button class="btn sm ghost" data-act="desp-quitar" data-id="${id}" aria-label="Quitar de la despensa">✕</button></div>`).join('') + `</div>`;
   }
+  if (quitados.length) h += `<h3 class="sec">Quitados de la despensa (${quitados.length})</h3><div class="card list" style="padding:4px 0">` + quitados.map(id =>
+    `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q">No lo compras: el plan lo cambia por otra cosa</div></div><button class="btn sm" data-act="desp-volver" data-id="${id}">Volver a ponerlo</button></div>`).join('') + `</div>`;
   h += `<h3 class="sec">Otros productos en casa (${extra.length})</h3><div class="card list" style="padding:4px 0">`;
   h += extra.length ? extra.map(id => `<div class="li"><div class="n">${esc(FOODS[id].n)}<div class="q num">${q(id)} · ${R(FOODS[id].k)} kcal · ${R(FOODS[id].p)} g P</div></div>${tog(id)}<button class="btn sm ghost" data-act="desp-del" data-id="${id}" aria-label="Quitar de la despensa">✕</button></div>`).join('')
     : `<div class="empty">Añade arriba lo que sueles tener: la app lo usará como primera opción en los intercambios.</div>`;
@@ -1841,7 +1848,11 @@ app.addEventListener('click', async e => {
   else if (a === 'copylist'){ const need = weeklyNeeds(); const txt = 'Lista de la compra (Mercadona)\n' + Object.keys(S.pantry).filter(id=>S.pantry[id]==='falta' && FOODS[id]).map(id => '- ' + (FOODS[id].brand || FOODS[id].n) + (need[id] ? ' (' + amount(id, need[id]) + ')' : '')).join('\n'); try{ await navigator.clipboard.writeText(txt); toast('Lista copiada'); }catch(_){ toast('No se pudo copiar'); } }
   else if (a === 'link') sheetLink(b.dataset.id);
   else if (a === 'desp-add'){ const id = b.dataset.id; useMDB(id); persistFood(id); S.despensa = S.despensa || {}; S.despensa[id] = Date.now(); delete S.pantry[id]; save(); render(); toast(FOODS[id].n + ' en la despensa'); }
-  else if (a === 'desp-del'){ const id = b.dataset.id; delete (S.despensa || {})[id]; delete S.pantry[id]; delete S.shop[id]; save(); render(); }
+  else if (a === 'desp-del'){ const id = b.dataset.id, prev = [S.despensa[id], S.pantry[id], S.shop[id]]; delete (S.despensa || {})[id]; delete S.pantry[id]; delete S.shop[id]; save(); render();
+    toast(FOODS[id].n + ' quitado de la despensa', () => { S.despensa[id] = prev[0]; if (prev[1]) S.pantry[id] = prev[1]; if (prev[2]) S.shop[id] = prev[2]; save(); render(); }); }
+  else if (a === 'desp-quitar'){ const id = b.dataset.id, prev = S.pantry[id]; S.pantry[id] = 'fuera'; delete S.shop[id]; save(); render();
+    toast(FOODS[id].n + ' quitado: el plan lo cambia por otra cosa', () => { if (prev) S.pantry[id] = prev; else delete S.pantry[id]; save(); render(); }); }
+  else if (a === 'desp-volver'){ delete S.pantry[b.dataset.id]; save(); render(); }
   else if (a === 'saveweight'){ const v = parseFloat(String(document.getElementById('wt').value).replace(',','.')); if (v > 30 && v < 250){ S.weights[dayKey()] = Math.round(v*10)/10; save(); render(); toast('Peso guardado'); } else toast('Peso no válido'); }
   else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } }
   else if (a === 'tday'){ const d = +b.dataset.d, s = S.settings; s.trainDays = s.trainDays.includes(d) ? s.trainDays.filter(x=>x!==d) : s.trainDays.concat(d); save(); render(); }
