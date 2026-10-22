@@ -160,7 +160,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 18;
+const VERSION = 19;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1745,11 +1745,8 @@ function pushCardHtml(){
 async function pushOn(){
   if (!pushSupported()) throw new Error('navegador sin avisos');
   if (await Notification.requestPermission() !== 'granted') throw new Error('sin permiso');
-  const reg = await navigator.serviceWorker.ready;
-  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
-  const r = await postJSON('/subscribe', {endpoint:sub.endpoint});
-  if (!r.ok) throw new Error('el servidor respondió ' + r.status);
-  setPushState({endpoint:sub.endpoint, hash:'', at:0});
+  // al activar (o reactivar) se empieza siempre con una suscripción nueva: la anterior puede estar caducada
+  setPushState({endpoint: await freshSub(true), hash:'', at:0});
   await syncSchedule(true);
 }
 async function pushOff(){
@@ -1759,13 +1756,29 @@ async function pushOff(){
 }
 let syncTimer = null;
 function queueSync(){ clearTimeout(syncTimer); syncTimer = setTimeout(() => syncSchedule(false), 2500); }
+// La suscripción push puede morir (Google la da por caducada, p. ej. al reinstalar la app) o cambiar sin avisar.
+// Se usa siempre la que tiene ahora el service worker; si no hay o el servidor la borró por caducada, se crea otra nueva.
+async function freshSub(renew){
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && renew){ try{ await sub.unsubscribe(); }catch(_){} sub = null; }
+  if (!sub) sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
+  const r = await postJSON('/subscribe', {endpoint:sub.endpoint});
+  if (!r.ok) throw new Error('el servidor respondió ' + r.status);
+  return sub.endpoint;
+}
 async function syncSchedule(force, extra = []){
   const ps = pushState(); if (!ps) return false;
   const items = buildNotifications().concat(extra), h = strHash(JSON.stringify(items));
+  try{
+    const reg = await navigator.serviceWorker.ready, cur = await reg.pushManager.getSubscription();
+    if (!cur || cur.endpoint !== ps.endpoint){ ps.endpoint = await freshSub(false); force = true; }
+  }catch(_){}
   if (!force && h === ps.hash && Date.now() - ps.at < 6*3600e3) return true;
   try{
     let r = await postJSON('/schedule', {endpoint:ps.endpoint, items});
-    if (r.status === 404){ await postJSON('/subscribe', {endpoint:ps.endpoint}); r = await postJSON('/schedule', {endpoint:ps.endpoint, items}); }
+    // 404: el servidor la borró porque Google la rechazó → suscripción nueva
+    if (r.status === 404){ ps.endpoint = await freshSub(true); r = await postJSON('/schedule', {endpoint:ps.endpoint, items}); }
     if (!r.ok) return false;
     setPushState(Object.assign(ps, {hash:h, at:Date.now()}));
     if (TAB === 'ajustes' && !document.querySelector('.sheet')) renderAjustes();
