@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 20;
+const VERSION = 21;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -777,11 +777,14 @@ function renderHoy(){
   const pLeft = pT - pC, kLeft = kT - kC, hayPend = D.remainingPlan.k > 0;
   const pTxt = pLeft <= 2 ? '✓ Objetivo cumplido'
     : !hayPend ? `Te quedaste a <b class="num">${R(pLeft)} g</b>`
-    : `Faltan <b class="num">${R(pLeft)} g</b>` + (Math.abs(D.remainingPlan.p - pLeft) >= 3 ? ` · el resto del plan aporta ${R(D.remainingPlan.p)} g` : '');
+    : `Faltan <b class="num">${R(pLeft)} g</b>`;
   const kTxt = kLeft < -50 ? `Llevas <b class="num">${R(-kLeft)} kcal</b> de más`
     : !hayPend && kLeft <= 50 ? '✓ En tu objetivo'
     : !hayPend ? `Te quedaste a <b class="num">${R(kLeft)} kcal</b>`
-    : `Faltan <b class="num">${R(Math.max(0, kLeft))} kcal</b>` + (hayPend && Math.abs(D.remainingPlan.k - kLeft) >= 100 ? ` · el resto del plan aporta ${R(D.remainingPlan.k)}` : '');
+    : `Faltan <b class="num">${R(Math.max(0, kLeft))} kcal</b>`;
+  // total del día si comes lo que queda tal como está apuntado (lo comido + lo pendiente)
+  const fin = hayPend ? addM(D.consumed, D.remainingPlan) : null;
+  const finTxt = (v, u) => fin ? `<div class="small muted">Con lo apuntado: <b class="num">${R(v)}${u}</b></div>` : '';
   const tr = D.sch.tr;
   const titulo = isToday ? 'Hoy' : k === addDays(dayKey(), -1) ? 'Ayer' : DAYS_LONG[d.getDay()][0].toUpperCase() + DAYS_LONG[d.getDay()].slice(1);
   let h = `<header class="top"><div class="daynav"><button class="navb" data-act="dayprev" aria-label="Día anterior">‹</button>
@@ -796,10 +799,10 @@ function renderHoy(){
   <section class="card hero" aria-label="Resumen">
     <div><div class="lbl">Proteína</div><div class="big num">${R(pC)}<span class="muted" style="font-size:20px"> / ${R(pT)} g</span></div>
       <div class="bar"><i style="width:${Math.min(100, pC/pT*100)}%"></i></div>
-      <div class="small">${pTxt}</div></div>
+      <div class="small">${pTxt}</div>${finTxt(fin && fin.p, ' g')}</div>
     <div ${D.minimo?'style="opacity:.45"':''}><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
       <div class="bar k"><i style="width:${Math.min(100, kC/kT*100)}%"></i></div>
-      <div class="small">${kTxt}</div></div>
+      <div class="small">${kTxt}</div>${finTxt(fin && fin.k, ' kcal')}</div>
     <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.target.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.target.f)} g</span></div>
   </section>`;
   // avisos inteligentes
