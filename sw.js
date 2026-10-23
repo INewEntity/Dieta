@@ -1,5 +1,5 @@
 // Service worker: funciona sin conexión y muestra los avisos push.
-const CACHE = 'dieta-v19';
+const CACHE = 'dieta-v20';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './badge-96.png'];
 const PUSH_API = 'https://dieta-avisos.dieta-avisos.workers.dev';
 
