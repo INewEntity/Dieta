@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 21;
+const VERSION = 22;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1236,16 +1236,18 @@ async function aiCall(system, content, schema){
   if (res.stop_reason === 'max_tokens') throw new Error('La respuesta de la IA se cortó. Prueba con algo más corto.');
   return JSON.parse(res.content.filter(b => b.type === 'text').map(b => b.text).join(''));
 }
-async function aiAnalyze({m, items, text, photo, at}){
-  // Preselección local: los ~20 productos de Mercadona que más se parecen a lo que cuenta (y los que ya usa)
+async function aiAnalyze({m, items, text, photo, at, fuera}){
+  // Preselección local: los ~20 productos de Mercadona que más se parecen a lo que cuenta (y los que ya usa).
+  // Si ha comido fuera no se buscan: lo de un bar o restaurante no es de Mercadona y va con valores genéricos.
   let cand = [];
-  if (text){ try{ await loadMDB(); cand = candidatesFor(text); }catch(_){} }
-  items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid && !cand.includes(it.id)) cand.push(it.id); });
+  if (text && !fuera){ try{ await loadMDB(); cand = candidatesFor(text); }catch(_){} }
+  if (!fuera) items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid && !cand.includes(it.id)) cand.push(it.id); });
   const prods = cand.map(id => { const F = useMDB(id) || FOODS[id]; const o = {id, nombre:F.n, por_100:{kcal:F.k, p:F.p, c:F.c, f:F.f}};
     if (F.ml) o.liquido = true; if (F.u) o.unidad_g = F.u; if (F.tal) o.sin_escurrir = true; return o; });
   const ctx = {comida: MEAL_NAME[m], hora_actual: fmt(nowMin()), hora_elegida_en_la_app: fmt(at),
     plan_de_esta_comida: items.map(it => ({id: it.id, alimento: dispName(it.id), g: R(it.g)})),
     productos_mercadona: prods};
+  if (fuera) ctx.comido_fuera = 'Ha comido FUERA de casa (bar, restaurante, casa de otros). No es de Mercadona ni de su despensa: pon TODO en extras, con valores genéricos de una tabla de composición española (tipo BEDCA) para ese alimento y esa forma de cocinarlo, y deja items vacío. Usa raciones típicas de España si no las dice y cuenta el aceite de la plancha o la fritura. Ejemplo: «choco a la plancha» → choco/sepia a la plancha, no un producto parecido.';
   const content = [];
   if (photo) content.push({type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}});
   content.push({type:'text', text:`Contexto de la app:\n${JSON.stringify(ctx)}\n\nLo que cuenta el usuario:\n${text || '(sin texto: usa la foto)'}`});
@@ -1283,6 +1285,8 @@ function sheetAI(m){
     <div class="sub">Cuéntalo como se lo dirías a alguien: «la mitad de la patata y un yogur», «menú del día: lentejas, lomo con patatas y flan», «me la he saltado».</div>
     <textarea id="aitxt" rows="4" placeholder="Escribe aquí…">${esc(aiDraft.text)}</textarea>
     <div class="row" style="margin-top:8px"><label class="btn sm" style="cursor:pointer">📷 Foto<input type="file" accept="image/*" capture="environment" id="aiph" hidden></label><span class="muted" id="phst" style="font-size:13px">${aiDraft.photo ? 'Foto añadida ✓' : 'Opcional'}</span></div>
+    <label class="f">¿Dónde?</label>
+    <div class="seg" id="aidonde"><button data-d="fuera" class="${aiDraft.fuera !== false ? 'on' : ''}">🍴 Fuera · valores genéricos</button><button data-d="casa" class="${aiDraft.fuera === false ? 'on' : ''}">🏠 En casa · mis productos</button></div>
     <label class="f">Hora</label>${timeInput('at', Math.min(nowFor(viewDay()), M.t))}
     <div id="aierr" class="tips" style="margin-top:10px"></div>
     <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="go">Analizar</button></div>
@@ -1292,6 +1296,8 @@ function sheetAI(m){
       try{ aiDraft.photo = await readPhoto(f); el.querySelector('#phst').textContent = 'Foto añadida ✓'; }catch(_){ el.querySelector('#phst').textContent = 'No se pudo leer la foto'; }
     });
     el.addEventListener('click', async e => {
+      const dd = e.target.closest('[data-d]');
+      if (dd){ aiDraft.fuera = dd.dataset.d === 'fuera'; el.querySelectorAll('#aidonde [data-d]').forEach(b => b.classList.toggle('on', b === dd)); return; }
       const x = e.target.closest('[data-x]'); if (!x) return;
       if (x.dataset.x === 'cancel'){ aiDraft = {text:'', photo:null}; return closeSheet(); }
       const text = el.querySelector('#aitxt').value.trim(); aiDraft.text = text;
@@ -1299,7 +1305,7 @@ function sheetAI(m){
       let at = toMin(el.querySelector('#at').value); if (at < 300) at += 1440;
       x.disabled = true; x.textContent = 'Analizando…'; el.querySelector('#aierr').innerHTML = '';
       try{
-        const r = await aiAnalyze({m, items:M.items, text, photo:aiDraft.photo, at});
+        const r = await aiAnalyze({m, items:M.items, text, photo:aiDraft.photo, at, fuera: aiDraft.fuera !== false});
         sheetAIReview(m, r, at);
       }catch(err){
         el.querySelector('#aierr').innerHTML = `<li class="coral">${esc(aiErrorText(err))}</li>`;
@@ -1317,7 +1323,7 @@ function sheetAIReview(m, r, at){
   const draw = el => {
     const rows = items.map((it,i) => { const F = FOODS[it.id];
       return `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(F.n)}</div><input type="number" inputmode="decimal" min="0" step="${F.u?1:5}" value="${F.u ? Math.round(it.g/F.u) : R(it.g)}" data-i="${i}" style="width:84px"><span class="muted" style="width:46px;font-size:13px">${F.u?F.un[1]:F.ml?'ml':'g'}</span><button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; })
-      .concat(extras.map((e,i) => `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(e.n)}<div class="muted num" style="font-size:12px">${R(e.g)} g · ${R(e.k)} kcal · ${R(e.p)} g prot.</div></div><button class="btn sm ghost" data-delx="${i}" aria-label="Quitar">✕</button></div>`));
+      .concat(extras.map((e,i) => `<div class="row" style="margin-bottom:8px"><div style="flex:1">${esc(e.n)}<div class="muted num" style="font-size:12px" id="xm${i}">${R(e.k)} kcal · ${R(e.p)} g prot.</div></div><input type="number" inputmode="decimal" min="0" step="5" value="${R(e.g)}" data-xi="${i}" style="width:84px"><span class="muted" style="width:46px;font-size:13px">g</span><button class="btn sm ghost" data-delx="${i}" aria-label="Quitar">✕</button></div>`));
     el.querySelector('#rv').innerHTML = status === 'skipped' ? '' : (rows.join('') || '<div class="empty">Sin alimentos</div>');
     const t = consumedOf({status:'changed', items, extra:extras});
     el.querySelector('#rvsum').textContent = status === 'skipped' ? '' : `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`;
@@ -1329,7 +1335,11 @@ function sheetAIReview(m, r, at){
     <div class="muted" style="font-size:13px">Hora: ${fmt(at)}. Puedes corregir los gramos antes de guardar.</div>
     <div class="evactions"><button class="btn ghost" data-x="back">Corregir texto</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
     draw(el);
-    el.addEventListener('input', e => { const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id], v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; });
+    el.addEventListener('input', e => {
+      // extras: los macros se escalan con los gramos
+      const xi = e.target.dataset.xi;
+      if (xi != null){ const x = extras[xi], v = parseFloat(e.target.value) || 0; if (x.g > 0){ const f = v / x.g; ['k','p','c','f'].forEach(q => x[q] *= f); } x.g = v; el.querySelector('#xm' + xi).textContent = `${R(x.k)} kcal · ${R(x.p)} g prot.`; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; return; }
+      const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id], v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; });
     el.addEventListener('click', e => {
       if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); return draw(el); }
       if (e.target.dataset.delx != null){ extras.splice(+e.target.dataset.delx, 1); return draw(el); }
