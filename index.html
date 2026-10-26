@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 22;
+const VERSION = 23;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -527,7 +527,7 @@ function basePlan(k, sch, opts = {}){
 // contra el objetivo que tenía ese día (ya compensado), para no devolver lo que ya se había compensado.
 const COMP = {dias:3, frac:0.5, min:-250, max:150, ruido:150};
 const kcalBase = () => +S.settings.kcal || 2500;
-const dayComplete = k => !dayIsEmpty(S.days[k]) && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
+const dayComplete = k => !dayIsEmpty(S.days[k]) && !S.days[k].nocuenta && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
 const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0);
 // → {k: objetivo del día, adj: compensación, src: [{k, e}] días que la causan}
 function dayKcal(k){
@@ -561,7 +561,6 @@ function consumedOf(log){
 
 function computeDay(k){
   const day = getDay(k), sch = computeSchedule(k), plan = basePlan(k, sch);
-  const minimo = !!day.minimo;
   let target = ZERO, consumed = ZERO, bal = ZERO;
   const meals = {};
   for (const m of sch.order){
@@ -610,7 +609,7 @@ function computeDay(k){
     tips.push({cls:'', html:`Te faltaban <b>${R(deficitP)} g de proteína</b> por lo que ha pasado antes. Lo he repartido en lo que queda del día.`});
   }
   // 2) Calorías
-  if (!minimo && pending.length){
+  if (pending.length){
     const net = bal.k + added.k;
     if (bal.k < -150){
       const extra = 0.5 * -bal.k - added.k;
@@ -644,7 +643,7 @@ function computeDay(k){
   }
   // 3) Cena tardía
   const late = toMin(S.settings.lateDinner);
-  if (meals.cena.status === 'pending' && !meals.cena.locked && meals.cena.t >= late && !minimo){
+  if (meals.cena.status === 'pending' && !meals.cena.locked && meals.cena.t >= late){
     const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb').reduce((a,x)=>a+mac(x.id,x.g).k,0);
     const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
     added = addM(added, got);
@@ -663,7 +662,7 @@ function computeDay(k){
         gap -= got.p;
       });
     }
-    if (!minimo){
+    {
       const over = consumed.k + sumRest('k') - TK;
       if (over > 40){
         const r = trimSurplus(pendLeft.map(m => meals[m]), over, true);
@@ -679,10 +678,10 @@ function computeDay(k){
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
 
-  if (minimo) tips.unshift({cls:'amber', html:'<b>Día mínimo</b>: el único objetivo de hoy es llegar a la proteína. Lo demás, lo que puedas.'});
+  if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b>: no entra en tus estadísticas, ni en la media de calorías, ni en la compensación de los días siguientes. Apunta lo que quieras o nada.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
-  return {k, sch, meals, target, consumed, remainingPlan, tips, minimo, bal, TK, comp};
+  return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, comp};
 }
 function computeSchedule(k){ return schedule(k); }
 
@@ -764,7 +763,7 @@ function render(){
 }
 function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 
-const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.minimo && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length);
+const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length);
 function renderHoy(){
   const k = viewDay(), isToday = k === dayKey(), existed = !!S.days[k];
   const D = computeDay(k), day = getDay(k), now = nowFor(k);
@@ -790,7 +789,7 @@ function renderHoy(){
   let h = `<header class="top"><div class="daynav"><button class="navb" data-act="dayprev" aria-label="Día anterior">‹</button>
       <div><h1>${titulo}</h1><div class="sub">${DAYS_LONG[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}</div></div>
       <button class="navb" data-act="daynext" aria-label="Día siguiente" ${isToday ? 'disabled' : ''}>›</button></div>
-    <button class="chip ${D.minimo?'on':''}" data-act="minimo">${D.minimo?'Día mínimo':'Día normal'}</button></header>
+    <button class="chip ${D.nocuenta?'on':''}" data-act="nocuenta">${D.nocuenta?'🚫 No cuenta':'Día normal'}</button></header>
   ${isToday ? '' : `<ul class="tips"><li class="amber">Estás viendo un <b>día pasado</b>. Lo que marques aquí corrige tu historial. <button class="stp-reset" data-act="daytoday">Volver a hoy</button></li></ul>`}
   <div class="chips">
     <button class="chip" data-act="wake">☀️ ${day.wake ? 'Levantado ' + day.wake : 'Despertar ' + S.settings.wake}</button>
@@ -800,7 +799,7 @@ function renderHoy(){
     <div><div class="lbl">Proteína</div><div class="big num">${R(pC)}<span class="muted" style="font-size:20px"> / ${R(pT)} g</span></div>
       <div class="bar"><i style="width:${Math.min(100, pC/pT*100)}%"></i></div>
       <div class="small">${pTxt}</div>${finTxt(fin && fin.p, ' g')}</div>
-    <div ${D.minimo?'style="opacity:.45"':''}><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
+    <div><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
       <div class="bar k"><i style="width:${Math.min(100, kC/kT*100)}%"></i></div>
       <div class="small">${kTxt}</div>${finTxt(fin && fin.k, ' kcal')}</div>
     <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.target.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.target.f)} g</span></div>
@@ -1671,7 +1670,7 @@ function historial(){
     const kOk = Math.abs(D.consumed.k - D.TK) <= D.TK * 0.08, pOk = D.consumed.p >= TP * 0.9;
     return `<button class="li" data-act="openday" data-k="${k}" style="width:100%;text-align:left">
       <div class="n">${DAYS_LONG[d.getDay()][0].toUpperCase() + DAYS_LONG[d.getDay()].slice(1)} ${d.getDate()} ${MONTHS[d.getMonth()]}
-        <div class="q num">${reg}/${ord.length} comidas registradas${S.days[k].minimo ? ' · día mínimo' : ''}${D.sch.tr.on ? ' · 🏋️' : ''}</div></div>
+        <div class="q num">${reg}/${ord.length} comidas registradas${S.days[k].nocuenta ? ' · no cuenta' : ''}${D.sch.tr.on ? ' · 🏋️' : ''}</div></div>
       <div class="num" style="text-align:right;font-size:14px"><span style="${ok(kOk)}">${R(D.consumed.k)}</span> <span class="muted">kcal</span><br><span style="${ok(pOk)}">${R(D.consumed.p)}</span> <span class="muted">g P</span></div>
       <span class="muted" style="font-size:18px">›</span></button>`;
   }).join('');
@@ -1679,7 +1678,7 @@ function historial(){
 function adherenceStats(){
   let meals = 0, ok = 0, protDays = 0, days = 0;
   for (let i = 1; i <= 7; i++){
-    const k = addDays(dayKey(), -i); if (!S.days[k]) continue;
+    const k = addDays(dayKey(), -i); if (!S.days[k] || S.days[k].nocuenta) continue;
     const D = computeDay(k); days++;
     D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed','moved'].includes(D.meals[m].status)) ok++; });
     if (D.consumed.p >= D.target.p * 0.9) protDays++;
@@ -1915,7 +1914,7 @@ app.addEventListener('click', async e => {
   else if (a === 'planreset'){ const day = getDay(viewDay()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
-  else if (a === 'minimo'){ const day = getDay(viewDay()); day.minimo = !day.minimo; save(); render(); }
+  else if (a === 'nocuenta'){ const day = getDay(viewDay()); day.nocuenta = !day.nocuenta; save(); render(); toast(day.nocuenta ? 'Este día no cuenta para tus estadísticas' : 'Este día vuelve a contar'); }
   else if (a === 'pantry'){ const id = b.dataset.id; if (S.pantry[id] === 'falta'){ delete S.pantry[id]; delete S.shop[id]; } else S.pantry[id] = 'falta'; save(); render(); }
   else if (a === 'bought'){ const id = b.dataset.id; S.shop[id] = !S.shop[id]; save(); render(); }
   else if (a === 'restock'){ Object.keys(S.shop).forEach(id => { if (S.shop[id]){ delete S.pantry[id]; delete S.shop[id]; } }); save(); render(); toast('Despensa actualizada'); }
