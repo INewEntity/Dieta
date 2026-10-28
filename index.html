@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 26;
+const VERSION = 27;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -239,6 +239,22 @@ const WEEK = {
   6:{almuerzo:ALM.ternera_pasta,cena:CEN.atun},
 };
 const MEAL_NAME = {desayuno:'Desayuno',almuerzo:'Almuerzo',merienda:'Batido',cena:'Cena'};
+// Copas de fiesta: valores genéricos por unidad (el alcohol da 7 kcal/g y no cuenta como hidratos ni grasa)
+const COPAS = {
+  cubata:   {n:'Cubata con refresco normal', d:'50 ml de destilado + refresco', k:190, c:22},
+  cubata0:  {n:'Cubata con refresco zero',   d:'ron-cola zero, gin-tónica light…', k:110, c:0},
+  coctel:   {n:'Cóctel',                     d:'mojito, gin-tonic, daiquiri…', k:220, c:25},
+  cana:     {n:'Caña de cerveza',            d:'200 ml', k:85, c:7},
+  tercio:   {n:'Tercio o botellín',          d:'330 ml', k:140, c:11},
+  vino:     {n:'Copa de vino',               d:'150 ml', k:120, c:4},
+  chupito:  {n:'Chupito',                    d:'40 ml', k:95, c:4},
+};
+function copasOf(day){
+  const f = day && day.fiesta; if (!f) return {n:0, k:0, p:0, c:0, f:0};
+  let n = 0, k = 0, c = 0;
+  for (const [t, q] of Object.entries(f.copas || {})) if (COPAS[t] && q > 0){ n += q; k += q * COPAS[t].k; c += q * COPAS[t].c; }
+  return {n, k, p:0, c, f:0};
+}
 const OTHER_PRESETS = {
   ligero:{label:'Algo ligero',k:600,p:30,c:65,f:20},
   normal:{label:'Comida normal',k:900,p:40,c:100,f:35},
@@ -528,7 +544,7 @@ function basePlan(k, sch, opts = {}){
 const COMP = {dias:3, frac:0.5, min:-250, max:150, ruido:150};
 const kcalBase = () => +S.settings.kcal || 2500;
 const dayComplete = k => !dayIsEmpty(S.days[k]) && !S.days[k].nocuenta && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
-const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0);
+const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0) + copasOf(S.days[k]).k;
 // → {k: objetivo del día, adj: compensación, src: [{k, e}] días que la causan}
 function dayKcal(k){
   const base = kcalBase(), adj = {}, exc = {};
@@ -596,6 +612,13 @@ function computeDay(k){
   }
   let added = ZERO;
 
+  // Fiesta: las copas (previstas o ya tomadas) cuentan como algo ya comido. Lo que queda del día recorta hidratos
+  // y grasa para hacerles sitio (la proteína no se toca) y lo que no quepa lo compensa la semana.
+  const copas = copasOf(day);
+  if (copas.k){
+    bal = addM(bal, copas);
+    tips.push({cls:'', html:`🍸 <b>${copas.n} copa${copas.n === 1 ? '' : 's'} ≈ ${R(copas.k)} kcal</b>. Les hago sitio recortando hidratos y grasa del resto del día, sin tocar la proteína. Lo que no quepa se compensa en los 3 días siguientes. Antes de salir, cena con proteína y bebe agua entre copa y copa.`});
+  }
   // 1) Proteína: recuperar lo que falte
   const deficitP = -bal.p;
   if (deficitP > 2 && pending.length){
@@ -621,7 +644,7 @@ function computeDay(k){
     } else if (net > 120){
       const r = trimSurplus(pending.map(m => meals[m]), net, true);
       added = addM(added, r.got);
-      tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${r.what} de lo que queda${r.prot ? ' (sigues llegando a tu proteína)' : ', sin tocar la proteína'}.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
+      if (!copas.k) tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${r.what} de lo que queda${r.prot ? ' (sigues llegando a tu proteína)' : ', sin tocar la proteína'}.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
     }
   }
   // Recorta kcal de lo que queda, de lo más prescindible a lo menos: hidratos (dejando algo), grasa, fruta,
@@ -654,19 +677,23 @@ function computeDay(k){
   const pendLeft = pending.filter(m => meals[m].status === 'pending');
   if (pendLeft.length){
     const sumRest = key => pendLeft.concat(locked).reduce((a, m) => a + sumItems(meals[m].items)[key], 0);
-    let gap = TP - consumed.p - sumRest('p');
-    if (gap > 2){
-      pendLeft.slice().reverse().forEach((m, i) => { // de la última comida hacia atrás
-        if (gap <= 2) return;
-        const got = boostProtein(meals[m], Math.min(40, gap / (pendLeft.length - i)));
-        gap -= got.p;
-      });
-    }
+    const fillProt = () => {
+      let gap = TP - consumed.p - sumRest('p');
+      if (gap > 2){
+        pendLeft.slice().reverse().forEach((m, i) => { // de la última comida hacia atrás
+          if (gap <= 2) return;
+          const got = boostProtein(meals[m], Math.min(40, gap / (pendLeft.length - i)));
+          gap -= got.p;
+        });
+      }
+    };
+    fillProt();
     {
-      const over = consumed.k + sumRest('k') - TK;
+      const over = consumed.k + copas.k + sumRest('k') - TK;
       if (over > 40){
         const r = trimSurplus(pendLeft.map(m => meals[m]), over, true);
-        if (!tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
+        if (!copas.k && !tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
+        fillProt(); // recortar hidratos también quita algo de proteína (pan, pasta, avena): se repone
       } else if (over < -60){
         // falta energía: más hidratos en lo que queda (no en una cena tardía, que va ligera a propósito)
         const ms = pendLeft.filter(m => !(m === 'cena' && meals.cena.t >= late)).map(m => meals[m]);
@@ -681,7 +708,7 @@ function computeDay(k){
   if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b>: no entra en tus estadísticas, ni en la media de calorías, ni en la compensación de los días siguientes. Apunta lo que quieras o nada.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
-  return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, comp};
+  return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, comp, copas};
 }
 function computeSchedule(k){ return schedule(k); }
 
@@ -763,14 +790,14 @@ function render(){
 }
 function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 
-const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length);
+const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !x.fiesta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length);
 function renderHoy(){
   const k = viewDay(), isToday = k === dayKey(), existed = !!S.days[k];
   const D = computeDay(k), day = getDay(k), now = nowFor(k);
   if (!existed && dayIsEmpty(day)) delete S.days[k]; // mirar un día no lo crea
   const d = keyToDate(k);
   // el objetivo que se ve es el de Ajustes; el plan del día queda a ±15 kcal y ±1 g de él tras el ajuste fino
-  const pT = +S.settings.prot || D.target.p, pC = D.consumed.p, kT = D.TK, kC = D.consumed.k;
+  const pT = +S.settings.prot || D.target.p, pC = D.consumed.p, kT = D.TK, kC = D.consumed.k + D.copas.k;
   // «Faltan» = objetivo − lo comido. Si lo que queda del plan no lo cubre exactamente (p. ej. en volumen solo se
   // recupera la mitad de las kcal perdidas, o ya no quedan comidas), se dice aparte para que las cifras cuadren.
   const pLeft = pT - pC, kLeft = kT - kC, hayPend = D.remainingPlan.k > 0;
@@ -794,6 +821,7 @@ function renderHoy(){
   <div class="chips">
     <button class="chip" data-act="wake">☀️ ${day.wake ? 'Levantado ' + day.wake : 'Despertar ' + S.settings.wake}</button>
     <button class="chip ${tr.on?'on':''}" data-act="train">🏋️ ${tr.on ? (tr.done ? 'Entrenado ' : 'Entreno ') + fmt(tr.start) : 'Descanso'}</button>
+    <button class="chip ${D.copas.n?'on':''}" data-act="fiesta">🍸 ${D.copas.n ? D.copas.n + ' copa' + (D.copas.n === 1 ? '' : 's') : 'Fiesta'}</button>
   </div>
   <section class="card hero" aria-label="Resumen">
     <div><div class="lbl">Proteína</div><div class="big num">${R(pC)}<span class="muted" style="font-size:20px"> / ${R(pT)} g</span></div>
@@ -1130,6 +1158,29 @@ function sheetSwap(m, i){
   });
 }
 
+// 🍸 Fiesta: copas de esta noche (se puede poner por la mañana) o de anoche (hasta las 5:00 es el mismo día)
+function sheetFiesta(){
+  const k = viewDay(), day = getDay(k), q = Object.assign({}, (day.fiesta || {}).copas);
+  const tot = () => { let n = 0, kc = 0; for (const t in q){ n += q[t]; kc += q[t] * COPAS[t].k; } return {n, kc}; };
+  const draw = el => {
+    el.querySelector('#cp').innerHTML = Object.entries(COPAS).map(([t, C]) => `<div class="li" style="padding-left:0;padding-right:0"><div class="n">${C.n}<div class="q">${C.d} · ~${C.k} kcal</div></div>
+      <span class="qty"><button class="stp" data-c="${t}" data-d="-1" aria-label="Una menos">−</button><span class="num" style="min-width:22px;text-align:center;font-weight:700">${q[t] || 0}</span><button class="stp" data-c="${t}" data-d="1" aria-label="Una más">+</button></span></div>`).join('');
+    const {n, kc} = tot(); el.querySelector('#cptot').textContent = n ? `${n} copa${n === 1 ? '' : 's'} ≈ ${R(kc)} kcal` : 'Sin copas';
+  };
+  sheet(`<h2>🍸 Fiesta</h2><div class="sub">Pon las copas que vas a tomar (o las que tomaste). Puedes hacerlo por la mañana: el resto del día les hace sitio con menos hidratos y grasa, sin tocar la proteína.</div>
+    <div class="list items" id="cp"></div><div class="muted num" id="cptot" style="margin:12px 0 4px;font-weight:700"></div>
+    <div class="evactions"><button class="btn ghost" data-x="del">Quitar fiesta</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    draw(el);
+    el.addEventListener('click', e => {
+      const b = e.target.closest('[data-c]');
+      if (b){ const t = b.dataset.c; q[t] = Math.max(0, (q[t] || 0) + +b.dataset.d); if (!q[t]) delete q[t]; return draw(el); }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'del' || !tot().n) delete day.fiesta; else day.fiesta = {copas:q};
+      save(); closeSheet(); render();
+      toast(day.fiesta ? `🍸 ${tot().n} copas: el día se ha recolocado` : 'Fiesta quitada');
+    });
+  });
+}
 function sheetWake(){
   const day = getDay(viewDay());
   sheet(`<h2>Despertar</h2><div class="sub">Todo el día se coloca a partir de aquí.</div>
@@ -1697,11 +1748,11 @@ function historial(){
     const D = computeDay(k), d = keyToDate(k);
     const ord = D.sch.order.filter(m => !D.meals[m].merged), reg = ord.filter(m => D.meals[m].status !== 'pending').length;
     const ok = x => x ? 'color:var(--lime-ink)' : 'color:var(--amber)';
-    const kOk = Math.abs(D.consumed.k - D.TK) <= D.TK * 0.08, pOk = D.consumed.p >= TP * 0.9;
+    const kOk = Math.abs(D.consumed.k + D.copas.k - D.TK) <= D.TK * 0.08, pOk = D.consumed.p >= TP * 0.9;
     return `<button class="li" data-act="openday" data-k="${k}" style="width:100%;text-align:left">
       <div class="n">${DAYS_LONG[d.getDay()][0].toUpperCase() + DAYS_LONG[d.getDay()].slice(1)} ${d.getDate()} ${MONTHS[d.getMonth()]}
         <div class="q num">${reg}/${ord.length} comidas registradas${S.days[k].nocuenta ? ' · no cuenta' : ''}${D.sch.tr.on ? ' · 🏋️' : ''}</div></div>
-      <div class="num" style="text-align:right;font-size:14px"><span style="${ok(kOk)}">${R(D.consumed.k)}</span> <span class="muted">kcal</span><br><span style="${ok(pOk)}">${R(D.consumed.p)}</span> <span class="muted">g P</span></div>
+      <div class="num" style="text-align:right;font-size:14px"><span style="${ok(kOk)}">${R(D.consumed.k + D.copas.k)}</span>${D.copas.n ? ' 🍸' : ''} <span class="muted">kcal</span><br><span style="${ok(pOk)}">${R(D.consumed.p)}</span> <span class="muted">g P</span></div>
       <span class="muted" style="font-size:18px">›</span></button>`;
   }).join('');
 }
@@ -1858,7 +1909,7 @@ async function syncDias(){
       const row = {dia:k, peso, cintura, nocuenta: !!(d && d.nocuenta)};
       if (!dayIsEmpty(d)){
         const D = computeDay(k), ord = D.sch.order.filter(m => !D.meals[m].merged);
-        Object.assign(row, {kcal:D.consumed.k, p:D.consumed.p, c:D.consumed.c, f:D.consumed.f, obj_kcal:D.TK, obj_p:+S.settings.prot || D.target.p,
+        Object.assign(row, {kcal:D.consumed.k + D.copas.k, copas:D.copas.n, p:D.consumed.p, c:D.consumed.c, f:D.consumed.f, obj_kcal:D.TK, obj_p:+S.settings.prot || D.target.p,
           comidas: ord.filter(m => D.meals[m].status !== 'pending').length, comidas_total: ord.length, entreno: !!(D.sch.tr.on && D.sch.tr.done)});
       }
       dias.push(row);
@@ -1967,6 +2018,7 @@ app.addEventListener('click', async e => {
   else if (a === 'planreset'){ const day = getDay(viewDay()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
+  else if (a === 'fiesta') sheetFiesta();
   else if (a === 'nocuenta'){ const day = getDay(viewDay()); day.nocuenta = !day.nocuenta; save(); render(); toast(day.nocuenta ? 'Este día no cuenta para tus estadísticas' : 'Este día vuelve a contar'); }
   else if (a === 'pantry'){ const id = b.dataset.id; if (S.pantry[id] === 'falta'){ delete S.pantry[id]; delete S.shop[id]; } else S.pantry[id] = 'falta'; save(); render(); }
   else if (a === 'bought'){ const id = b.dataset.id; S.shop[id] = !S.shop[id]; save(); render(); }
