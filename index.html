@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 24;
+const VERSION = 25;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1281,7 +1281,14 @@ let aiDraft = {text:'', photo:null};
 // Si hay que matizar algo, «Corregir texto» vuelve a la hoja de la IA con la foto ya puesta.
 function fotoMeal(m){
   if (!aiKey()){ TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
-  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.capture = 'environment';
+  sheet(`<h2>📷 ${MEAL_NAME[m]}</h2><div class="sub">La IA mira el plato y lo apunta con valores genéricos.</div>
+    <div class="stack"><button class="opt sel" data-f="cam"><span>📸 Hacer una foto</span><span class="d">cámara</span></button>
+    <button class="opt" data-f="gal"><span>🖼️ Subir una foto</span><span class="d">de la galería</span></button></div>`, el => {
+    el.addEventListener('click', e => { const b = e.target.closest('[data-f]'); if (b) pickPhoto(m, b.dataset.f === 'cam'); });
+  });
+}
+function pickPhoto(m, cam){
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; if (cam) inp.capture = 'environment';
   inp.addEventListener('change', async () => {
     const f = inp.files[0]; if (!f) return;
     const k = viewDay(), M = computeDay(k).meals[m], at = Math.min(nowFor(k), Math.max(M.t, nowFor(k) - 60));
@@ -1305,17 +1312,17 @@ function sheetAI(m){
   sheet(`<h2>✨ ${MEAL_NAME[m]}: ¿qué has comido?</h2>
     <div class="sub">Cuéntalo como se lo dirías a alguien: «la mitad de la patata y un yogur», «menú del día: lentejas, lomo con patatas y flan», «me la he saltado».</div>
     <textarea id="aitxt" rows="4" placeholder="Escribe aquí…">${esc(aiDraft.text)}</textarea>
-    <div class="row" style="margin-top:8px"><label class="btn sm" style="cursor:pointer">📷 Foto<input type="file" accept="image/*" capture="environment" id="aiph" hidden></label><span class="muted" id="phst" style="font-size:13px">${aiDraft.photo ? 'Foto añadida ✓' : 'Opcional'}</span></div>
+    <div class="row" style="margin-top:8px"><label class="btn sm" style="cursor:pointer">📸 Cámara<input type="file" accept="image/*" capture="environment" class="aiph" hidden></label><label class="btn sm" style="cursor:pointer">🖼️ Galería<input type="file" accept="image/*" class="aiph" hidden></label><span class="muted" id="phst" style="font-size:13px">${aiDraft.photo ? 'Foto añadida ✓' : 'Opcional'}</span></div>
     <label class="f">¿Dónde?</label>
     <div class="seg" id="aidonde"><button data-d="fuera" class="${aiDraft.fuera !== false ? 'on' : ''}">🍴 Fuera · valores genéricos</button><button data-d="casa" class="${aiDraft.fuera === false ? 'on' : ''}">🏠 En casa · mis productos</button></div>
     <label class="f">Hora</label>${timeInput('at', Math.min(nowFor(viewDay()), M.t))}
     <div id="aierr" class="tips" style="margin-top:10px"></div>
     <div class="evactions"><button class="btn ghost" data-x="cancel">Cancelar</button><button class="btn pri" data-x="go">Analizar</button></div>
     <div class="muted" style="font-size:12px;margin-top:8px">${AI_MODELS[S.settings.aiModel].n} · ${aiCostHint(S.settings.aiModel)} por consulta</div>`, el => {
-    el.querySelector('#aiph').addEventListener('change', async e => {
+    el.querySelectorAll('.aiph').forEach(i => i.addEventListener('change', async e => {
       const f = e.target.files[0]; if (!f) return;
       try{ aiDraft.photo = await readPhoto(f); el.querySelector('#phst').textContent = 'Foto añadida ✓'; }catch(_){ el.querySelector('#phst').textContent = 'No se pudo leer la foto'; }
-    });
+    }));
     el.addEventListener('click', async e => {
       const dd = e.target.closest('[data-d]');
       if (dd){ aiDraft.fuera = dd.dataset.d === 'fuera'; el.querySelectorAll('#aidonde [data-d]').forEach(b => b.classList.toggle('on', b === dd)); return; }
