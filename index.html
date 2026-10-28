@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 25;
+const VERSION = 26;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1844,7 +1844,29 @@ async function pushOff(){
   setPushState(null);
 }
 let syncTimer = null;
-function queueSync(){ clearTimeout(syncTimer); syncTimer = setTimeout(() => syncSchedule(false), 2500); }
+function queueSync(){ clearTimeout(syncTimer); syncTimer = setTimeout(() => { syncSchedule(false); syncDias(); }, 2500); }
+// Resumen diario para el entrenador, que lo cruza con Hevy: totales de los últimos 14 días, no cada alimento.
+// Va con un token aleatorio de este móvil; solo se envía si algo ha cambiado.
+let diasHash = '';
+async function syncDias(){
+  try{
+    if (!S.syncToken){ S.syncToken = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join(''); save(); }
+    const dias = [];
+    for (let i = 13; i >= 0; i--){
+      const k = addDays(dayKey(), -i), d = S.days[k], peso = S.weights[k] ?? null, cintura = (S.waist || {})[k] ?? null;
+      if (dayIsEmpty(d) && peso == null && cintura == null) continue;
+      const row = {dia:k, peso, cintura, nocuenta: !!(d && d.nocuenta)};
+      if (!dayIsEmpty(d)){
+        const D = computeDay(k), ord = D.sch.order.filter(m => !D.meals[m].merged);
+        Object.assign(row, {kcal:D.consumed.k, p:D.consumed.p, c:D.consumed.c, f:D.consumed.f, obj_kcal:D.TK, obj_p:+S.settings.prot || D.target.p,
+          comidas: ord.filter(m => D.meals[m].status !== 'pending').length, comidas_total: ord.length, entreno: !!(D.sch.tr.on && D.sch.tr.done)});
+      }
+      dias.push(row);
+    }
+    const h = strHash(JSON.stringify(dias)); if (h === diasHash) return;
+    const r = await postJSON('/dias', {token:S.syncToken, dias}); if (r.ok) diasHash = h;
+  }catch(_){}
+}
 // La suscripción push puede morir (Google la da por caducada, p. ej. al reinstalar la app) o cambiar sin avisar.
 // Se usa siempre la que tiene ahora el service worker; si no hay o el servidor la borró por caducada, se crea otra nueva.
 async function freshSub(renew){
