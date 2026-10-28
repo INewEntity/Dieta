@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 27;
+const VERSION = 28;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -215,6 +215,8 @@ const GROUP_NAME = {prot:'Proteína',carb:'Hidratos',fruta:'Fruta',verd:'Verdura
 /* ===================== Plan semanal (de 01_Dieta.md) ===================== */
 const DESAYUNO = [['huevo',220],['pan',100],['platano',120],['nueces',15]];
 const BATIDO = [['whey',30],['leche',250],['avena',40]];
+// desde este día el batido va todos los días (antes, solo los de entreno; el historial anterior no cambia)
+const BATIDO_DIARIO = '2026-10-28';
 const ALM = {
   pollo_arroz:[['pollo',200],['arroz',100],['brocoli',200],['zanahoria',100],['aove',10],['naranja',150]],
   ternera_pasta:[['ternera',180],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
@@ -441,7 +443,7 @@ function wakeOf(k){ const d = getDay(k); return toMin(d.wake || S.settings.wake)
 
 function desiredTimes(wake, tr){
   const bk = wake + 30, dinnerBase = wake + 720;
-  if (!tr.on) return {desayuno:bk, almuerzo:bk+270, cena:Math.max(dinnerBase, bk+570)};
+  if (!tr.on) return {desayuno:bk, almuerzo:bk+270, merienda:bk+465, cena:Math.max(dinnerBase, bk+630)};
   const tS = tr.start, tE = tS + tr.dur;
   if (tS < bk + 60){ // entreno nada más levantarse
     const d = Math.max(bk, tE + 20), a = d + 240, m = a + 180;
@@ -454,7 +456,7 @@ function desiredTimes(wake, tr){
 
 function schedule(k){
   const day = getDay(k), tr = trainOf(k), wake = wakeOf(k), want = desiredTimes(wake, tr);
-  const order = ['desayuno','almuerzo'].concat(tr.on ? ['merienda'] : [], ['cena']);
+  const order = ['desayuno','almuerzo'].concat(tr.on || k >= BATIDO_DIARIO ? ['merienda'] : [], ['cena']);
   // cada comida pendiente va, como pronto, «hueco mínimo» después de la anterior (hecha o prevista)
   // si una comida se registra ANTES de su hora prevista, lo que queda se adelanta lo mismo (adv < 0);
   // si se registra tarde, ya lo empuja el hueco mínimo
@@ -484,7 +486,7 @@ function schedule(k){
 /* ===================== Plan del día y motor de ajuste ===================== */
 function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
 // Escala el plan del día al objetivo: primero la proteína, luego hidratos y grasa.
-// Fruta y verdura no se tocan. El batido (días de entreno) entra dentro del total.
+// Fruta y verdura no se tocan. El batido entra dentro del total.
 function fitToTarget(plan, kT = kcalBase()){
   const all = Object.values(plan).flat();
   const pT = +S.settings.prot || 160;
@@ -509,7 +511,7 @@ function fitToTarget(plan, kT = kcalBase()){
 function basePlan(k, sch, opts = {}){
   const wd = keyToDate(k).getDay(), day = getDay(k);
   const plan = {desayuno:mkItems(DESAYUNO), almuerzo:mkItems(WEEK[wd].almuerzo), cena:mkItems(WEEK[wd].cena)};
-  if (sch.tr.on) plan.merienda = mkItems(BATIDO);
+  if (sch.order.includes('merienda')) plan.merienda = mkItems(BATIDO);
   const kT = dayKcal(k).k;
   fitToTarget(plan, kT);
   if (opts.noSwaps) return plan;
@@ -1212,7 +1214,7 @@ function sheetTrain(){
       const x = e.target.closest('[data-x]'); if (!x) return;
       day.train = day.train || {};
       if (x.dataset.x === 'on'){ day.train.on = true; save(); closeSheet(); render(); return sheetTrain(); }
-      if (x.dataset.x === 'off'){ day.train.on = false; day.train.done = false; save(); closeSheet(); render(); toast('Hoy descanso: quito el batido'); return; }
+      if (x.dataset.x === 'off'){ day.train.on = false; day.train.done = false; save(); closeSheet(); render(); toast('Hoy descanso'); return; }
       day.train.on = true; day.train.time = el.querySelector('#tt').value; day.train.dur = dur;
       if (x.dataset.x === 'done') day.train.done = !tr.done;
       save(); closeSheet(); render();
@@ -1631,7 +1633,7 @@ function weeklyNeeds(){
   const need = {};
   const add = (arr, mult=1) => arr.forEach(([id,g]) => need[id] = (need[id]||0) + g*mult);
   for (let wd = 0; wd < 7; wd++){ add(DESAYUNO); add(WEEK[wd].almuerzo); add(WEEK[wd].cena); }
-  add(BATIDO, S.settings.trainDays.length);
+  add(BATIDO, 7);
   return need;
 }
 let despQuery = '';
@@ -1795,7 +1797,7 @@ function renderAjustes(){
     <label class="f" style="margin-top:0">Objetivo diario</label>
     <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Calorías</label><input type="number" inputmode="numeric" step="50" min="1200" max="5000" data-s="kcal" value="${s.kcal}"></div>
       <div style="flex:1"><label class="f" style="margin-top:0">Proteína (g)</label><input type="number" inputmode="numeric" step="5" min="60" max="300" data-s="prot" value="${s.prot}"></div></div>
-    <div class="muted" style="font-size:13px;margin-top:8px">Las cantidades de cada comida se recalculan solas: primero se ajusta la proteína y luego los hidratos y la grasa. La fruta y la verdura no cambian. Los días de entreno, el batido entra dentro de este total.</div>
+    <div class="muted" style="font-size:13px;margin-top:8px">Las cantidades de cada comida se recalculan solas: primero se ajusta la proteína y luego los hidratos y la grasa. La fruta y la verdura no cambian. El batido entra dentro de este total.</div>
   </div>
   <div class="card">
     <label class="f" style="margin-top:0">✨ IA (Claude)</label>
