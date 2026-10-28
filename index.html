@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 23;
+const VERSION = 24;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -866,7 +866,7 @@ function mealCard(M, now){
     }).join('')}</ul>`;
   const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}</div>` : '';
   const actions = st === 'pending'
-    ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
+    ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="foto" data-m="${M.key}" aria-label="Foto de lo que he comido">📷</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
   return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
     <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
@@ -1277,6 +1277,28 @@ function readPhoto(file){
   });
 }
 let aiDraft = {text:'', photo:null};
+// 📷 en la tarjeta: abre la cámara, analiza la foto como comida de fuera (valores genéricos) y enseña la revisión.
+// Si hay que matizar algo, «Corregir texto» vuelve a la hoja de la IA con la foto ya puesta.
+function fotoMeal(m){
+  if (!aiKey()){ TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.capture = 'environment';
+  inp.addEventListener('change', async () => {
+    const f = inp.files[0]; if (!f) return;
+    const k = viewDay(), M = computeDay(k).meals[m], at = Math.min(nowFor(k), Math.max(M.t, nowFor(k) - 60));
+    sheet(`<h2>📷 ${MEAL_NAME[m]}</h2><div class="sub">Analizando la foto…</div><div class="empty" id="fst">La IA está mirando qué hay en el plato.</div>`);
+    try{
+      aiDraft = {text:'', photo: await readPhoto(f), fuera:true};
+      const r = await aiAnalyze({m, items:M.items, text:'', photo:aiDraft.photo, at, fuera:true});
+      sheetAIReview(m, r, at);
+    }catch(err){
+      sheet(`<h2>📷 ${MEAL_NAME[m]}</h2><ul class="tips"><li class="coral">${esc(aiErrorText(err))}</li></ul>
+        <div class="evactions"><button class="btn ghost" data-x="cancel">Cerrar</button><button class="btn pri" data-x="txt">Añadir texto y reintentar</button></div>`, el => {
+        el.addEventListener('click', e => { const x = e.target.closest('[data-x]'); if (!x) return; if (x.dataset.x === 'txt') sheetAI(m); else closeSheet(); });
+      });
+    }
+  });
+  inp.click();
+}
 function sheetAI(m){
   if (!aiKey()){ closeSheet(); TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
   const k = viewDay(), M = computeDay(k).meals[m];
@@ -1328,11 +1350,12 @@ function sheetAIReview(m, r, at){
     el.querySelector('#rvsum').textContent = status === 'skipped' ? '' : `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`;
   };
   sheet(`<h2>${MEAL_NAME[m]}: ${label.toLowerCase()}</h2>
+    ${aiDraft.photo ? `<img src="data:image/jpeg;base64,${aiDraft.photo}" alt="Tu foto" style="width:100%;max-height:180px;object-fit:cover;border-radius:12px;margin:6px 0">` : ''}
     <div class="sub">${esc(r.resumen || '')} <span class="badge ${r.confianza==='baja'?'late':''}">confianza ${esc(r.confianza || 'media')}</span></div>
     <div id="rv"></div><div class="muted num" id="rvsum" style="margin:10px 0"></div>
     ${r.consejo ? `<ul class="tips"><li>${esc(r.consejo)}</li></ul>` : ''}
     <div class="muted" style="font-size:13px">Hora: ${fmt(at)}. Puedes corregir los gramos antes de guardar.</div>
-    <div class="evactions"><button class="btn ghost" data-x="back">Corregir texto</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
+    <div class="evactions"><button class="btn ghost" data-x="back">Añadir detalles</button><button class="btn pri" data-x="ok">Guardar</button></div>`, el => {
     draw(el);
     el.addEventListener('input', e => {
       // extras: los macros se escalan con los gramos
@@ -1907,6 +1930,7 @@ app.addEventListener('click', async e => {
   else if (a === 'qty') changeQty(m, +b.dataset.i, +b.dataset.d);
   else if (a === 'qtyset') sheetQty(m, +b.dataset.i);
   else if (a === 'coach') sheetCoach(m);
+  else if (a === 'foto') fotoMeal(m);
   else if (a === 'dayprev'){ VIEW = addDays(viewDay(), -1); window.scrollTo(0,0); render(); }
   else if (a === 'daynext'){ const n = addDays(viewDay(), 1); VIEW = n >= dayKey() ? null : n; window.scrollTo(0,0); render(); }
   else if (a === 'daytoday'){ VIEW = null; window.scrollTo(0,0); render(); }
