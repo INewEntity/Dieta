@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 30;
+const VERSION = 31;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -720,6 +720,21 @@ function computeDay(k){
         });
       }
     };
+    // Con una comida fijada a mano, lo que queda se ajusta al gramo a los objetivos del día (sin márgenes de
+    // tolerancia): proteína con la carne/pescado, grasa con el aceite/frutos secos y kcal con los hidratos.
+    if (locked.length){
+      const ms = pendLeft.map(m => meals[m]);
+      const fit = (grp, key, gap, lo, hi) => {
+        const its = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
+        const own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
+        if (!own || Math.abs(gap) < 1) return;
+        const f = Math.max(lo, Math.min(hi, 1 + gap / own));
+        its.forEach(it => { const g = roundG(it.id, it.g * f); if (g !== it.g){ it.orig = it.orig ?? it.g; it.g = g; } });
+      };
+      fit('prot', 'p', TP - consumed.p - sumRest('p'), 0.5, 1.5);
+      fit('grasa', 'f', target.f - consumed.f - sumRest('f'), 0, 2);
+      fit('carb', 'k', TK - consumed.k - copas.k - sumRest('k'), 0.4, 1.6);
+    }
     fillProt();
     {
       const over = consumed.k + copas.k + sumRest('k') - TK;
