@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 32;
+const VERSION = 33;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -565,33 +565,28 @@ function basePlan(k, sch, opts = {}){
   return plan;
 }
 
-/* ===================== Compensación entre días ===================== */
-// Lo que te pasas (o te quedas corto) un día se compensa a medias en los 3 días siguientes: la mitad, repartida,
-// con un tope de −250 kcal/día (o +150 si te quedaste corto: en volumen no hace falta recuperarlo todo).
-// La proteína no se toca. Solo cuentan los días con desayuno, almuerzo y cena registrados, y el exceso se mide
-// contra el objetivo que tenía ese día (ya compensado), para no devolver lo que ya se había compensado.
-const COMP = {dias:3, frac:0.5, min:-250, max:150, ruido:150};
+/* ===================== Compensación semanal ===================== */
+// La media de la semana (lunes a domingo) se intenta clavar en el objetivo: lo que te hayas pasado o quedado
+// corto en los días anteriores de la semana se reparte entero entre los días que quedan, hoy incluido.
+// Topes por día: −400 / +300 kcal (lo que no quepa se pierde; la semana siguiente empieza de cero).
+// La proteína no se toca. Solo cuentan los días con desayuno, almuerzo y cena registrados (y que cuenten);
+// los demás se dan por cumplidos.
+const COMP = {min:-400, max:300};
 const kcalBase = () => +S.settings.kcal || 2500;
 const dayComplete = k => !dayIsEmpty(S.days[k]) && !S.days[k].nocuenta && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
 const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0) + copasOf(S.days[k]).k;
-// → {k: objetivo del día, adj: compensación, src: [{k, e}] días que la causan}
+// → {k: objetivo del día, adj: compensación, src: [{k, e}] días anteriores de la semana, quedan: días que reparten}
 function dayKcal(k){
-  const base = kcalBase(), adj = {}, exc = {};
-  for (let i = 3 * COMP.dias; i >= 0; i--){
-    const j = addDays(k, -i);
-    let a = 0;
-    for (let d = 1; d <= COMP.dias; d++){ const e = exc[addDays(j, -d)]; if (e) a -= e * COMP.frac / COMP.dias; }
-    adj[j] = Math.round(Math.max(COMP.min, Math.min(COMP.max, a)) / 10) * 10;
-    if (i > 0 && dayComplete(j)){ const e = consumedK(j) - (base + adj[j]); if (Math.abs(e) >= COMP.ruido) exc[j] = e; }
-  }
-  const src = [];
-  for (let d = COMP.dias; d >= 1; d--){ const j = addDays(k, -d); if (exc[j]) src.push({k:j, e:exc[j]}); }
-  return {k: base + adj[k], adj: adj[k], src};
+  const base = kcalBase(), src = [];
+  for (let j = weekStart(k); j < k; j = addDays(j, 1)) if (dayComplete(j)) src.push({k:j, e:consumedK(j) - base});
+  const E = src.reduce((a, s) => a + s.e, 0), quedan = 7 - (keyToDate(k).getDay() + 6) % 7;
+  const adj = Math.round(Math.max(COMP.min, Math.min(COMP.max, -E / quedan)) / 10) * 10;
+  return {k: base + adj, adj, src, E, quedan};
 }
-// Media de lo comido en los últimos 7 días completos (sin hoy)
-function weekKcal(){
+// Media de lo comido en los días completos de una semana (lunes a domingo; si es la actual, hasta ayer)
+function weekKcal(lunes){
   const ks = [];
-  for (let i = 1; i <= 7; i++){ const k = addDays(dayKey(), -i); if (dayComplete(k)) ks.push(k); }
+  for (let i = 0; i < 7; i++){ const k = addDays(lunes, i); if (k < dayKey() && dayComplete(k)) ks.push(k); }
   return {n: ks.length, avg: ks.length ? ks.reduce((a, k) => a + consumedK(k), 0) / ks.length : 0};
 }
 // «falta» = se acabó (va a la lista de la compra); «fuera» = quitado de la despensa (no lo compras): el plan lo cambia
@@ -635,9 +630,8 @@ function computeDay(k){
   const locked = sch.order.filter(m => meals[m].locked);
   const tips = [];
   if (comp.adj){
-    const dias = comp.src.map(s => `el ${DAYS_LONG[keyToDate(s.k).getDay()]} ${s.e > 0 ? 'te pasaste' : 'te quedaste corto'} ${R(Math.abs(s.e))} kcal`);
-    const lista = dias.length > 1 ? dias.slice(0, -1).join(', ') + ' y ' + dias[dias.length - 1] : dias[0];
-    tips.push({cls:'', html:`Objetivo de este día: <b>${R(TK)} kcal</b> (${comp.adj > 0 ? '+' : '−'}${Math.abs(comp.adj)}), porque ${lista}. Compenso la mitad en 3 días; la proteína no cambia.`});
+    const signo = comp.E > 0 ? 'te has pasado' : 'te has quedado corto';
+    tips.push({cls:'', html:`Objetivo de este día: <b>${R(TK)} kcal</b> (${comp.adj > 0 ? '+' : '−'}${Math.abs(comp.adj)}). Esta semana ${signo} <b>${R(Math.abs(comp.E))} kcal</b> en total y lo reparto entre ${comp.quedan === 1 ? 'hoy, que es el último día' : `los ${comp.quedan} días que quedan`}, para que la media semanal quede en ${kcalBase()}. La proteína no cambia.`});
   }
   let added = ZERO;
 
@@ -646,7 +640,7 @@ function computeDay(k){
   const copas = copasOf(day);
   if (copas.k){
     bal = addM(bal, copas);
-    tips.push({cls:'', html:`🍸 <b>${copas.n} copa${copas.n === 1 ? '' : 's'} ≈ ${R(copas.k)} kcal</b>. Les hago sitio recortando hidratos y grasa del resto del día, sin tocar la proteína. Lo que no quepa se compensa en los 3 días siguientes. Antes de salir, cena con proteína y bebe agua entre copa y copa.`});
+    tips.push({cls:'', html:`🍸 <b>${copas.n} copa${copas.n === 1 ? '' : 's'} ≈ ${R(copas.k)} kcal</b>. Les hago sitio recortando hidratos y grasa del resto del día, sin tocar la proteína. Lo que no quepa se compensa en lo que queda de semana. Antes de salir, cena con proteína y bebe agua entre copa y copa.`});
   }
   // 1) Proteína: recuperar lo que falte
   const deficitP = -bal.p;
@@ -735,7 +729,7 @@ function computeDay(k){
         if (!copas.k && !tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
         fillProt(); // recortar hidratos también quita algo de proteína (pan, pasta, avena): se repone
       } else if (over < -150){
-        tips.push({cls:'', html:`Aun así te quedan <b>${R(-over)} kcal</b> por debajo: no caben sin cargar demasiado lo que queda. Se compensan en los próximos días.`});
+        tips.push({cls:'', html:`Aun así te quedan <b>${R(-over)} kcal</b> por debajo: no caben sin cargar demasiado lo que queda. Se compensan en lo que queda de semana.`});
       }
     }
   }
@@ -1813,7 +1807,7 @@ function adherence(){
   if (!days) return `<div class="empty">Aún no hay días registrados.</div>`;
   return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
     <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>
-    ${(w => w.n ? `<div class="small" style="margin-top:10px">Media de calorías: <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} con las 3 comidas principales registradas.</div>` : '')(weekKcal())}`;
+    ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}`;
 }
 function chart(keys){
   const W = 520, H = 150, P = 18;
