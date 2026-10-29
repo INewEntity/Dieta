@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 31;
+const VERSION = 32;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -661,22 +661,7 @@ function computeDay(k){
     });
     tips.push({cls:'', html:`Te faltaban <b>${R(deficitP)} g de proteína</b> por lo que ha pasado antes. Lo he repartido en lo que queda del día.`});
   }
-  // 2) Calorías
-  if (pending.length){
-    const net = bal.k + added.k;
-    if (bal.k < -150){
-      const extra = 0.5 * -bal.k - added.k;
-      if (extra > 60){
-        const got = scaleGroup(pending.map(m=>meals[m]), 'carb', extra, 0.25);
-        added = addM(added, got);
-        if (got.k > 30) tips.push({cls:'', html:`He recuperado <b>la mitad de las calorías</b> que faltaban (fase de volumen) con algo más de hidratos. La otra mitad no hace falta.`});
-      }
-    } else if (net > 120){
-      const r = trimSurplus(pending.map(m => meals[m]), net, true);
-      added = addM(added, r.got);
-      if (!copas.k) tips.push({cls:'amber', html:`Vas <b>${R(net)} kcal por encima</b>. He recortado ${r.what} de lo que queda${r.prot ? ' (sigues llegando a tu proteína)' : ', sin tocar la proteína'}.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
-    }
-  }
+  // 2) Calorías: las ajusta el repaso final, al gramo, en lo que queda del día
   // Recorta kcal de lo que queda, de lo más prescindible a lo menos: hidratos (dejando algo), grasa, fruta,
   // la leche del batido, el resto de hidratos y, si se permite, la proteína que sobre del objetivo. Nunca la verdura.
   function trimSurplus(ms, cut, conProteina){
@@ -720,20 +705,27 @@ function computeDay(k){
         });
       }
     };
-    // Con una comida fijada a mano, lo que queda se ajusta al gramo a los objetivos del día (sin márgenes de
-    // tolerancia): proteína con la carne/pescado, grasa con el aceite/frutos secos y kcal con los hidratos.
-    if (locked.length){
+    // Lo que queda se ajusta a los objetivos del día con lo ya apuntado o fijado a mano, en todas las comidas:
+    // proteína con la carne/pescado, grasa con el aceite/frutos secos y kcal con los hidratos. Topes: los
+    // hidratos suben como mucho un 30 % por alimento (nunca en una cena tardía); lo que no quepa lo compensa la semana.
+    {
       const ms = pendLeft.map(m => meals[m]);
-      const fit = (grp, key, gap, lo, hi) => {
-        const its = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
+      const fit = (grp, key, gap, min, lo, hi, solo = ms) => {
+        const its = solo.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
         const own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
-        if (!own || Math.abs(gap) < 1) return;
+        if (!own || Math.abs(gap) < min) return; // menos que esto es redondeo: no se toca
         const f = Math.max(lo, Math.min(hi, 1 + gap / own));
         its.forEach(it => { const g = roundG(it.id, it.g * f); if (g !== it.g){ it.orig = it.orig ?? it.g; it.g = g; } });
       };
-      fit('prot', 'p', TP - consumed.p - sumRest('p'), 0.5, 1.5);
-      fit('grasa', 'f', target.f - consumed.f - sumRest('f'), 0, 2);
-      fit('carb', 'k', TK - consumed.k - copas.k - sumRest('k'), 0.4, 1.6);
+      const k0 = sumRest('k');
+      fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25);
+      fit('grasa', 'f', target.f - consumed.f - sumRest('f'), 3, 0, 2);
+      const gapK = TK - consumed.k - copas.k - sumRest('k');
+      fit('carb', 'k', gapK, 25, 0.4, 1.3, gapK > 0 ? ms.filter(M => !(M.key === 'cena' && M.t >= late)) : ms);
+      fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25); // el pan, la pasta o la avena también traen proteína
+      const dk = sumRest('k') - k0;
+      if (dk < -60 && !copas.k) tips.push({cls:'amber', html:`Con lo apuntado ibas <b>${R(-dk)} kcal por encima</b>. He ajustado lo que queda (menos hidratos y grasa), sin bajar de tu proteína.`});
+      else if (dk > 60) tips.push({cls:'', html:`Te faltaban <b>${R(dk)} kcal</b> por lo apuntado. Las he repartido en lo que queda del día.`});
     }
     fillProt();
     {
@@ -742,12 +734,8 @@ function computeDay(k){
         const r = trimSurplus(pendLeft.map(m => meals[m]), over, true);
         if (!copas.k && !tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
         fillProt(); // recortar hidratos también quita algo de proteína (pan, pasta, avena): se repone
-      } else if (over < -60){
-        // falta energía: más hidratos en lo que queda (no en una cena tardía, que va ligera a propósito)
-        const ms = pendLeft.filter(m => !(m === 'cena' && meals.cena.t >= late)).map(m => meals[m]);
-        // como mucho +25 % por alimento, para no cargar la última comida; lo que falte lo compensa la semana
-        const got = scaleGroup(ms, 'carb', -over, 0.25);
-        if (got.k > 60 && !tips.some(t => /calorías que faltaban/.test(t.html))) tips.push({cls:'', html:`He recuperado las <b>calorías que faltaban</b> con algo más de hidratos en lo que queda.`});
+      } else if (over < -150){
+        tips.push({cls:'', html:`Aun así te quedan <b>${R(-over)} kcal</b> por debajo: no caben sin cargar demasiado lo que queda. Se compensan en los próximos días.`});
       }
     }
   }
