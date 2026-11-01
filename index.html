@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 34;
+const VERSION = 35;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -570,7 +570,7 @@ function basePlan(k, sch, opts = {}){
 // corto en los días anteriores de la semana se reparte entero entre los días que quedan, hoy incluido.
 // Topes por día: −400 / +300 kcal (lo que no quepa se pierde; la semana siguiente empieza de cero).
 // La proteína no se toca. Solo cuentan los días con desayuno, almuerzo y cena registrados (y que cuenten);
-// los demás se dan por cumplidos.
+// los demás se dan por cumplidos: de un día que no cuenta no se sabe si se comió de más o de menos.
 const COMP = {min:-400, max:300};
 const kcalBase = () => +S.settings.kcal || 2500;
 const dayComplete = k => !dayIsEmpty(S.days[k]) && !S.days[k].nocuenta && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
@@ -736,7 +736,7 @@ function computeDay(k){
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
 
-  if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b>: no entra en tus estadísticas, ni en la media de calorías, ni en la compensación de los días siguientes. Apunta lo que quieras o nada.'});
+  if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b> para tus estadísticas (medias, % del plan, proteína), pero no se olvida: ha existido y se comió lo que se comió, así que al valorar tu peso de estos días se tiene en cuenta que ha pasado algo. No se compensa, porque no se sabe si fue de más o de menos.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
   return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, comp, copas};
@@ -1759,9 +1759,13 @@ function renderProgreso(){
   let advice = 'Necesito al menos 3 semanas con 3 o más pesadas para recomendarte algo. Sigue así.';
   if (full.length >= 3){
     const [a,b,c] = full.slice(-3).map(w=>w.avg), d1 = b-a, d2 = c-b;
-    if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
+    // los días que no cuentan no entran en las medias, pero sí en la decisión: comida y agua extra que mueven la báscula
+    const ncUlt = diasNoCuenta(full[full.length-1].w), ncAnt = diasNoCuenta(full[full.length-2].w), ncTxt = n => `${n} día${n === 1 ? '' : 's'} que no cuenta${n === 1 ? '' : 'n'}`;
+    if (d2 > 0.35 && ncUlt) advice = `<b>Subes ${d2.toFixed(2).replace('.',',')} kg</b> la última semana, pero tuvo ${ncTxt(ncUlt)}: parte del salto puede venir de esos días (comida distinta, sal, agua), no de grasa. <b>No bajes todavía</b>; si la semana que viene sigue por encima de +0,35 kg, entonces sí.`;
+    else if (d1 < 0.1 && d2 < 0.1 && (ncUlt || ncAnt)) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas, aunque hubo ${ncTxt(ncUlt + ncAnt)} de por medio. Dos semanas seguidas sin subir indican que falta comida: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
+    else if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
     else if (d2 > 0.35) advice = `<b>Subes más de 0,35 kg/semana</b>: demasiado rápido, parte será grasa.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="-150">Bajar a ${(+S.settings.kcal)-150} kcal</button></div>`;
-    else advice = `Ritmo correcto (${d2>=0?'+':''}${d2.toFixed(2).replace('.',',')} kg la última semana). <b>No toques nada.</b>`;
+    else advice = `Ritmo correcto (${d2>=0?'+':''}${d2.toFixed(2).replace('.',',')} kg la última semana). <b>No toques nada.</b>${ncUlt ? ` Hubo ${ncTxt(ncUlt)}: tenlo en cuenta, el peso de esa semana puede ir algo movido por ${ncUlt === 1 ? 'ese día' : 'esos días'}.` : ''}`;
   } else if (full.length === 2){ const d = full[1].avg - full[0].avg; advice = `Última semana: <b>${d>=0?'+':''}${d.toFixed(2).replace('.',',')} kg</b>. Objetivo: +0,15 a +0,25 kg/semana. Con una semana más te digo si hay que ajustar.`; }
   h += `<ul class="tips"><li>${advice}</li></ul>`;
   if (weeks.length) h += `<h3 class="sec">Medias semanales</h3><div class="card" style="padding:6px 12px"><table class="t num"><tr><th>Semana</th><th>Media</th><th>Cambio</th><th>Días</th></tr>${weeks.slice(-8).reverse().map((w,i,arr)=>{ const prev = arr[i+1]; const d = prev ? w.avg - prev.avg : null; const dd = keyToDate(w.w);
@@ -1792,6 +1796,10 @@ function historial(){
       <span class="muted" style="font-size:18px">›</span></button>`;
   }).join('');
 }
+// Días marcados como «no cuenta» (con algo pasado) en la semana que empieza en `lunes`
+function diasNoCuenta(lunes){
+  let n = 0; for (let i = 0; i < 7; i++){ const d = S.days[addDays(lunes, i)]; if (d && d.nocuenta) n++; } return n;
+}
 function adherenceStats(){
   let meals = 0, ok = 0, protDays = 0, days = 0;
   for (let i = 1; i <= 7; i++){
@@ -1800,14 +1808,16 @@ function adherenceStats(){
     D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed','moved'].includes(D.meals[m].status)) ok++; });
     if (D.consumed.p >= D.target.p * 0.9) protDays++;
   }
-  return {days, protDays, pct: meals ? R(ok/meals*100) : 0};
+  let nc = 0; for (let i = 1; i <= 7; i++){ const d = S.days[addDays(dayKey(), -i)]; if (d && d.nocuenta) nc++; }
+  return {days, protDays, nc, pct: meals ? R(ok/meals*100) : 0};
 }
 function adherence(){
-  const {days, protDays, pct} = adherenceStats();
-  if (!days) return `<div class="empty">Aún no hay días registrados.</div>`;
+  const {days, protDays, nc, pct} = adherenceStats();
+  const ncNota = nc ? `<div class="small" style="margin-top:10px">Además hubo <b>${nc} día${nc === 1 ? '' : 's'} que no cuenta${nc === 1 ? '' : 'n'}</b>. Queda${nc === 1 ? '' : 'n'} fuera de estas cifras, pero no es un hueco: al valorar tu peso se tiene${nc === 1 ? '' : 'n'} en cuenta.</div>` : '';
+  if (!days) return ncNota || `<div class="empty">Aún no hay días registrados.</div>`;
   return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
     <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>
-    ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}`;
+    ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}${ncNota}`;
 }
 function chart(keys){
   const W = 520, H = 150, P = 18;
