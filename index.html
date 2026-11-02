@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 40;
+const VERSION = 41;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -630,13 +630,25 @@ function basePlan(k, sch, opts = {}){
 // La proteína no se toca. Solo cuentan los días con desayuno, almuerzo y cena registrados (y que cuenten);
 // los demás se dan por cumplidos: de un día que no cuenta no se sabe si se comió de más o de menos.
 const COMP = {min:-400, max:300};
-const kcalBase = () => +S.settings.kcal || 2500;
+// Objetivo de kcal de un día: el que tenía ese día. Si lo cambias a mitad de semana, los días anteriores se comparan
+// con su objetivo, no con el nuevo (si no, la compensación sumaría de más). S.kcalHist = [[desde, kcal], …]
+function kcalBase(k){
+  const h = S.kcalHist || [];
+  if (k) for (let i = h.length - 1; i >= 0; i--) if (h[i][0] <= k) return h[i][1];
+  return +S.settings.kcal || 2500;
+}
+function setKcal(v){
+  const hoy = dayKey(), h = S.kcalHist || [];
+  if (!h.length) h.push(['0000-00-00', +S.settings.kcal || 2500]); // lo de antes de cambiarlo por primera vez
+  S.kcalHist = h.filter(([d]) => d < hoy).concat([[hoy, v]]);
+  S.settings.kcal = v;
+}
 const dayComplete = k => !dayIsEmpty(S.days[k]) && !S.days[k].nocuenta && ['desayuno','almuerzo','cena'].every(m => { const l = S.days[k].meals[m]; return l && l.status !== 'pending'; });
 const consumedK = k => Object.values(S.days[k].meals).reduce((a, l) => a + consumedOf(l).k, 0) + copasOf(S.days[k]).k;
 // → {k: objetivo del día, adj: compensación, src: [{k, e}] días anteriores de la semana, quedan: días que reparten}
 function dayKcal(k){
-  const base = kcalBase(), src = [];
-  for (let j = weekStart(k); j < k; j = addDays(j, 1)) if (dayComplete(j)) src.push({k:j, e:consumedK(j) - base});
+  const base = kcalBase(k), src = [];
+  for (let j = weekStart(k); j < k; j = addDays(j, 1)) if (dayComplete(j)) src.push({k:j, e:consumedK(j) - kcalBase(j)});
   const E = src.reduce((a, s) => a + s.e, 0), quedan = 7 - (keyToDate(k).getDay() + 6) % 7;
   const adj = Math.round(Math.max(COMP.min, Math.min(COMP.max, -E / quedan)) / 10) * 10;
   return {k: base + adj, adj, src, E, quedan};
@@ -645,7 +657,8 @@ function dayKcal(k){
 function weekKcal(lunes){
   const ks = [];
   for (let i = 0; i < 7; i++){ const k = addDays(lunes, i); if (k < dayKey() && dayComplete(k)) ks.push(k); }
-  return {n: ks.length, avg: ks.length ? ks.reduce((a, k) => a + consumedK(k), 0) / ks.length : 0};
+  const media = f => ks.length ? ks.reduce((a, k) => a + f(k), 0) / ks.length : 0;
+  return {n: ks.length, avg: media(consumedK), obj: media(kcalBase)};
 }
 // «falta» = se acabó (va a la lista de la compra); «fuera» = quitado de la despensa (no lo compras): el plan lo cambia
 const noHay = id => S.pantry[id] === 'falta' || S.pantry[id] === 'fuera';
@@ -677,6 +690,21 @@ function computeDay(k){
       bal = addM(bal, addM(sumItems(own), planned, -1));
     }
   }
+  // alimentos movidos de una comida a otra (pulsación larga): salen de una y entran en la otra antes de ajustar el
+  // día, así las dos comidas se siguen ajustando solas (si alguna tiene cantidades fijadas, el cambio va en ellas)
+  for (const mv of day.moves || []){
+    const A = meals[mv.from], B = meals[mv.to]; if (!A || !B) continue;
+    let it = null;
+    if (mv.sacar && A.status === 'pending' && !A.locked){ const j = A.items.findIndex(x => x.id === mv.id && !x.mf); if (j >= 0) [it] = A.items.splice(j, 1); }
+    if (mv.poner && B.status === 'pending' && !B.locked){
+      const g = it ? it.g : mv.g;
+      B.items.push({id:mv.id, g, mf:mv.from});
+      if (A.status !== 'pending') bal = addM(bal, mac(mv.id, g)); // la comida de origen ya no lo aporta: lo aporta esta
+    }
+    if (A.status === 'pending') A.notes.push(`↪ ${esc(FOODS[mv.id].n)} se ha movido a ${MEAL_NAME[mv.to].toLowerCase()}.`);
+    if (B.status === 'pending') B.notes.push(`↪ ${esc(FOODS[mv.id].n)} viene de ${MEAL_NAME[mv.from].toLowerCase()}.`);
+    A.movido = B.movido = true;
+  }
   // el batido que no cabe va con la cena
   if (meals.merienda && meals.merienda.merged && meals.cena.status === 'pending'){
     meals.cena.items = meals.cena.items.concat(meals.merienda.items.map(x => Object.assign({}, x, {fromBatido:true})));
@@ -689,7 +717,7 @@ function computeDay(k){
   const tips = [];
   if (comp.adj){
     const signo = comp.E > 0 ? 'te has pasado' : 'te has quedado corto';
-    tips.push({cls:'', html:`Objetivo de este día: <b>${R(TK)} kcal</b> (${comp.adj > 0 ? '+' : '−'}${Math.abs(comp.adj)}). Esta semana ${signo} <b>${R(Math.abs(comp.E))} kcal</b> en total y lo reparto entre ${comp.quedan === 1 ? 'hoy, que es el último día' : `los ${comp.quedan} días que quedan`}, para que la media semanal quede en ${kcalBase()}. La proteína no cambia.`});
+    tips.push({cls:'', html:`Objetivo de este día: <b>${R(TK)} kcal</b> (${comp.adj > 0 ? '+' : '−'}${Math.abs(comp.adj)}). Esta semana ${signo} <b>${R(Math.abs(comp.E))} kcal</b> en total y lo reparto entre ${comp.quedan === 1 ? 'hoy, que es el último día' : `los ${comp.quedan} días que quedan`}, para que la media semanal quede en ${kcalBase(k)}. La proteína no cambia.`});
   }
   let added = ZERO;
 
@@ -905,7 +933,7 @@ function render(){
 }
 function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 
-const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !x.fiesta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length);
+const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !x.fiesta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length && !(x.moves || []).length);
 function renderHoy(){
   const k = viewDay(), isToday = k === dayKey(), existed = !!S.days[k];
   const D = computeDay(k), day = getDay(k), now = nowFor(k);
@@ -924,7 +952,7 @@ function renderHoy(){
     : !hayPend ? `Te quedaste a <b class="num">${R(kLeft)} kcal</b>`
     : `Faltan <b class="num">${R(Math.max(0, kLeft))} kcal</b>`;
   // total del día si comes lo que queda tal como está apuntado (lo comido + lo pendiente)
-  const fin = hayPend ? addM(D.consumed, D.remainingPlan) : null;
+  const fin = hayPend ? addM(addM(D.consumed, D.copas), D.remainingPlan) : null;
   const finTxt = (v, u) => fin ? `<div class="small muted">Con lo apuntado: <b class="num">${R(v)}${u}</b></div>` : '';
   const tr = D.sch.tr;
   const titulo = isToday ? 'Hoy' : k === addDays(dayKey(), -1) ? 'Ayer' : DAYS_LONG[d.getDay()][0].toUpperCase() + DAYS_LONG[d.getDay()].slice(1);
@@ -1001,15 +1029,16 @@ function mealCard(M, now){
   else if (st !== 'skipped') items = `<ul class="items">${M.items.map((it,i)=>{
       const cls = it.added ? 'plus' : it.delta > 0 ? 'plus' : it.delta < 0 ? 'minus' : it.missing ? 'miss' : '';
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
-      const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>' : '';
+      const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>'
+        : it.mf ? ` <span class="muted" style="font-size:12px">(de ${MEAL_NAME[it.mf].toLowerCase()})</span>` : '';
       const name = esc(dispName(it.id)) + sub;
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
       const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
       return st === 'pending' && !it.fromBatido
-        ? `<li class="${cls} mv" data-move="${M.key}" data-i="${i}">${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<button class="amt num qamt" data-act="qtyset" data-m="${M.key}" data-i="${i}" aria-label="Escribir la cantidad de ${esc(dispName(it.id))}">${amt}</button>${stp(1)}</span></li>`
+        ? `<li class="${cls}${it.added || it.mf ? '' : ' mv'}" ${it.added || it.mf ? '' : `data-move="${M.key}" data-i="${i}"`}>${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<button class="amt num qamt" data-act="qtyset" data-m="${M.key}" data-i="${i}" aria-label="Escribir la cantidad de ${esc(dispName(it.id))}">${amt}</button>${stp(1)}</span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
     }).join('')}</ul>`;
-  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}</div>` : '';
+  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}${M.movido ? ` <button class="stp-reset" data-act="moveundo" data-m="${M.key}">Deshacer el movimiento</button>` : ''}</div>` : '';
   const actions = st === 'pending'
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="foto" data-m="${M.key}" aria-label="Foto de lo que he comido">📷</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
@@ -1525,7 +1554,9 @@ function sheetAI(m){
 }
 function sheetAIReview(m, r, at){
   const items = (r.items || []).filter(it => FOODS[it.id] && it.g > 0).map(it => ({id:it.id, g:it.g}));
-  const extras = (r.extras || []).filter(e => e.g >= 0).map(e => ({n:e.nombre, g:e.g, k:e.kcal, p:e.p, c:e.c, f:e.f}));
+  // b = macros por gramo, para recalcularlos al cambiar los gramos (aunque se borre el número y se vuelva a escribir)
+  const extras = (r.extras || []).filter(e => e.g >= 0).map(e => ({n:e.nombre, g:e.g, k:e.kcal, p:e.p, c:e.c, f:e.f,
+    b: e.g > 0 ? {k:e.kcal / e.g, p:e.p / e.g, c:e.c / e.g, f:e.f / e.g} : null}));
   if (/^\d{1,2}:\d{2}$/.test(r.hora || '')){ at = toMin(r.hora); if (at < 300) at += 1440; }
   const status = {hecha:'done', cambios:'changed', otra:'other', saltada:'skipped'}[r.accion] || 'changed';
   const label = {done:'Hecha tal cual', changed:'Con cambios', other:'Otra cosa', skipped:'Saltada'}[status];
@@ -1548,7 +1579,7 @@ function sheetAIReview(m, r, at){
     el.addEventListener('input', e => {
       // extras: los macros se escalan con los gramos
       const xi = e.target.dataset.xi;
-      if (xi != null){ const x = extras[xi], v = parseFloat(e.target.value) || 0; if (x.g > 0){ const f = v / x.g; ['k','p','c','f'].forEach(q => x[q] *= f); } x.g = v; el.querySelector('#xm' + xi).textContent = `${R(x.k)} kcal · ${R(x.p)} g prot.`; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; return; }
+      if (xi != null){ const x = extras[xi], v = parseFloat(e.target.value) || 0; if (x.b) ['k','p','c','f'].forEach(q => x[q] = x.b[q] * v); x.g = v; el.querySelector('#xm' + xi).textContent = `${R(x.k)} kcal · ${R(x.p)} g prot.`; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; return; }
       const i = e.target.dataset.i; if (i == null) return; const F = FOODS[items[i].id], v = parseFloat(e.target.value) || 0; items[i].g = F.u ? v*F.u : v; const t = consumedOf({status:'changed', items, extra:extras}); el.querySelector('#rvsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína · ${R(t.c)} g hidratos · ${R(t.f)} g grasa`; });
     el.addEventListener('click', e => {
       if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); return draw(el); }
@@ -1557,7 +1588,7 @@ function sheetAIReview(m, r, at){
       if (x.dataset.x === 'back') return sheetAI(m);
       aiDraft = {text:'', photo:null}; closeSheet();
       if (status === 'skipped') return logMeal(m, 'skipped');
-      logMeal(m, status, {at, items:items.filter(i => i.g > 0), extra:extras, resumen:r.resumen || ''});
+      logMeal(m, status, {at, items:items.filter(i => i.g > 0), extra:extras.map(({b, ...x}) => x), resumen:r.resumen || ''});
     });
   });
 }
@@ -1716,13 +1747,17 @@ function sheetMove(m, i){
     el.addEventListener('click', e => {
       if (e.target.closest('[data-x]')) return closeSheet();
       const b = e.target.closest('[data-to]'); if (!b) return;
-      const to = b.dataset.to, day = getDay(k), snap = structuredClone({pe: day.planEdit || {}, ml: day.meals});
-      const src = planItems(m), dst = planItems(to), [mv] = src.splice(i, 1);
-      dst.push({id:mv.id, g:mv.g, mf:m});
+      const to = b.dataset.to, day = getDay(k), snap = structuredClone({pe: day.planEdit || {}, ml: day.meals, mv: day.moves || []});
+      // en una comida con cantidades fijadas el cambio va en ellas; en las demás se apunta el movimiento y las dos
+      // comidas se siguen ajustando solas (antes se quedaban fijadas)
+      const srcLocked = !!D.meals[m].locked, dstLocked = !!D.meals[to].locked;
+      if (srcLocked) planItems(m).splice(i, 1);
+      if (dstLocked) planItems(to).push({id:it.id, g:it.g, mf:m});
+      if (!srcLocked || !dstLocked) (day.moves = day.moves || []).push({from:m, to, id:it.id, g:it.g, sacar:!srcLocked, poner:!dstLocked});
       // si la comida se queda vacía, cuenta como hecha junto con la otra (no como saltada)
-      if (!src.length) day.meals[m] = {status:'moved', to, items:[]};
+      if (D.meals[m].items.filter(x => !x.fromBatido).length <= 1) day.meals[m] = {status:'moved', to, items:[]};
       save(); closeSheet(); render();
-      toast(`${FOODS[mv.id].n} → ${MEAL_NAME[to].toLowerCase()}`, () => { day.planEdit = snap.pe; day.meals = snap.ml; save(); render(); });
+      toast(`${FOODS[it.id].n} → ${MEAL_NAME[to].toLowerCase()}`, () => { day.planEdit = snap.pe; day.meals = snap.ml; day.moves = snap.mv; save(); render(); });
     });
   });
 }
@@ -1731,6 +1766,7 @@ function undoMove(m){
   const day = getDay(viewDay()), to = day.meals[m].to;
   delete day.meals[m]; if (day.planEdit) delete day.planEdit[m];
   if (day.planEdit && day.planEdit[to]){ day.planEdit[to] = day.planEdit[to].filter(x => x.mf !== m); }
+  if (day.moves) day.moves = day.moves.filter(x => x.from !== m);
   save(); render(); toast(MEAL_NAME[m] + ' vuelve a su plan');
 }
 function bindSwipes(){
@@ -1757,11 +1793,16 @@ function bindSwipes(){
 }
 
 /* ===================== Despensa y compra ===================== */
+// Lo que vas a comer en los próximos 7 días según el plan de la app (con los ajustes a tu objetivo y el reparto
+// entre comidas, no el menú en bruto), sin los cambios de un solo día
 function weeklyNeeds(){
-  const need = {};
-  const add = (arr, mult=1) => arr.forEach(([id,g]) => need[id] = (need[id]||0) + g*mult);
-  for (let wd = 0; wd < 7; wd++){ add(DESAYUNO); add(WEEK[wd].almuerzo); add(WEEK[wd].cena); }
-  add(BATIDO, 7);
+  const need = {}, hoy = dayKey();
+  for (let d = 0; d < 7; d++){
+    const k = addDays(hoy, d), existed = !!S.days[k];
+    const plan = basePlan(k, schedule(k), {noSwaps:true});
+    if (!existed) delete S.days[k]; // no guardar días futuros vacíos
+    Object.values(plan).flat().forEach(it => need[it.id] = (need[it.id] || 0) + it.g);
+  }
   return need;
 }
 let despQuery = '';
@@ -1894,15 +1935,16 @@ function historial(){
 function diasNoCuenta(lunes){
   let n = 0; for (let i = 0; i < 7; i++){ const d = S.days[addDays(lunes, i)]; if (d && d.nocuenta) n++; } return n;
 }
-function adherenceStats(){
+// Los 7 días anteriores a `hasta` (por defecto, hoy)
+function adherenceStats(hasta = dayKey()){
   let meals = 0, ok = 0, protDays = 0, days = 0;
   for (let i = 1; i <= 7; i++){
-    const k = addDays(dayKey(), -i); if (!S.days[k] || S.days[k].nocuenta) continue;
+    const k = addDays(hasta, -i); if (!S.days[k] || S.days[k].nocuenta || k >= dayKey()) continue;
     const D = computeDay(k); days++;
     D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed','moved'].includes(D.meals[m].status)) ok++; });
-    if (D.consumed.p >= D.target.p * 0.9) protDays++;
+    if (D.consumed.p >= D.OBJ.p * 0.9) protDays++;
   }
-  let nc = 0; for (let i = 1; i <= 7; i++){ const d = S.days[addDays(dayKey(), -i)]; if (d && d.nocuenta) nc++; }
+  let nc = 0; for (let i = 1; i <= 7; i++){ const d = S.days[addDays(hasta, -i)]; if (d && d.nocuenta) nc++; }
   return {days, protDays, nc, pct: meals ? R(ok/meals*100) : 0};
 }
 function adherence(){
@@ -1911,7 +1953,7 @@ function adherence(){
   if (!days) return ncNota || `<div class="empty">Aún no hay días registrados.</div>`;
   return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
     <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>
-    ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${kcalBase()}, ${w.avg - kcalBase() >= 0 ? '+' : '−'}${R(Math.abs(w.avg - kcalBase()))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}${ncNota}`;
+    ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${R(w.obj)}, ${w.avg - w.obj >= 0 ? '+' : '−'}${R(Math.abs(w.avg - w.obj))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}${ncNota}`;
 }
 function chart(keys){
   const W = 520, H = 150, P = 18;
@@ -1987,7 +2029,8 @@ function renderAjustes(){
     if (['trainDur','gap','kcal','prot'].includes(key)) v = +v;
     if (key === 'kcal' && !(v >= 1200 && v <= 5000)) return toast('Pon entre 1200 y 5000 kcal');
     if (key === 'prot' && !(v >= 60 && v <= 300)) return toast('Pon entre 60 y 300 g');
-    S.settings[key] = v; save(); toast(key === 'kcal' || key === 'prot' ? 'Objetivo guardado: el plan se ha recalculado' : 'Guardado');
+    if (key === 'kcal') setKcal(v); else S.settings[key] = v;
+    save(); toast(key === 'kcal' || key === 'prot' ? 'Objetivo guardado: el plan se ha recalculado' : 'Guardado');
   }));
   app.querySelector('#imp').addEventListener('change', async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -2043,8 +2086,12 @@ function queueSync(){ clearTimeout(syncTimer); syncTimer = setTimeout(() => { sy
 // Resumen diario para el entrenador, que lo cruza con Hevy: totales de los últimos 14 días, no cada alimento.
 // Va con un token aleatorio de este móvil; solo se envía si algo ha cambiado.
 let diasHash = '';
+// La vista previa del ordenador (localhost) no sube nada: el servidor es solo para el móvil. Si subiera, sus datos
+// de prueba se mezclarían con los tuyos y el entrenador podría leer los de prueba.
+const DEV = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 async function syncDias(){
   try{
+    if (DEV) return;
     if (!S.syncToken){ S.syncToken = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join(''); save(); }
     const dias = [];
     for (let i = 13; i >= 0; i--){
@@ -2064,13 +2111,18 @@ async function syncDias(){
 }
 // Copia completa en el servidor (la key de la IA y los avisos van aparte y no viajan). Si se borran los datos
 // de Chrome, se recupera todo con el código de copia (= syncToken), en Ajustes → Copia de seguridad.
-let copiaHash = '';
+// Solo se sube si algo ha cambiado desde la última copia (también entre aperturas de la app).
+const COPIA_HASH = 'dieta.copiaHash';
+let copiaHash = (() => { try{ return localStorage.getItem(COPIA_HASH) || ''; }catch(_){ return ''; } })();
 async function syncCopia(){
   try{
-    if (!S.syncToken) return;
-    const data = JSON.stringify(S), h = strHash(data); if (h === copiaHash) return;
+    if (DEV || !S.syncToken) return;
+    // una app recién instalada, sin nada apuntado, no sube copia (no pisaría nada, pero no hay nada que guardar)
+    if (!Object.values(S.days).some(d => !dayIsEmpty(d)) && !Object.keys(S.weights).length) return;
+    // la hora de la última copia no cuenta como cambio: si contara, la copia se volvería a subir sin parar
+    const {copiaAt, ...resto} = S, data = JSON.stringify(resto), h = strHash(data); if (h === copiaHash) return;
     const r = await postJSON('/copia', {token:S.syncToken, data});
-    if (r.ok){ copiaHash = h; S.copiaAt = Date.now(); localStorage.setItem(STORE, JSON.stringify(S)); }
+    if (r.ok){ copiaHash = h; try{ localStorage.setItem(COPIA_HASH, h); }catch(_){} S.copiaAt = Date.now(); save(); }
   }catch(_){}
 }
 async function restaurarCopia(code){
@@ -2085,7 +2137,7 @@ async function restaurarCopia(code){
   Object.assign(B.weights, S.weights); Object.assign(B.waist, S.waist || {});
   B.syncToken = code; B.restaurada = true; B.copiaAt = j.act;
   localStorage.setItem(STORE, JSON.stringify(B));
-  load(); copiaHash = ''; diasHash = '';
+  load(); copiaHash = ''; diasHash = ''; try{ localStorage.removeItem(COPIA_HASH); }catch(_){}
   return Object.keys(B.days).length;
 }
 // La suscripción push puede morir (Google la da por caducada, p. ej. al reinstalar la app) o cambiar sin avisar.
@@ -2123,8 +2175,10 @@ function cookList(items){
   return items.filter(it => it.g > 0 && FOODS[it.id].g !== 'fruta' && FOODS[it.id].g !== 'liq')
     .map(it => FOODS[it.id].u ? amount(it.id, it.g) : `${amount(it.id, it.g)} de ${lowerName(it.id)}`).join(', ');
 }
-function weeklySummaryText(){
-  const st = adherenceStats(), w = weeklyAvgs().filter(x => x.n >= 3), parts = [];
+// El aviso del domingo se prepara antes (cuando abres la app): cuenta la semana que acaba ese domingo con lo
+// apuntado hasta entonces, y se actualiza cada vez que abres la app.
+function weeklySummaryText(domingo){
+  const st = adherenceStats(domingo), w = weeklyAvgs().filter(x => x.n >= 3), parts = [];
   if (st.days) parts.push(`Comidas del plan: ${st.pct} %. Días con tu proteína: ${st.protDays}/${st.days}.`);
   if (w.length){ const last = w[w.length-1], prev = w[w.length-2]; parts.push(`Peso medio: ${last.avg.toFixed(1).replace('.',',')} kg` + (prev ? ` (${last.avg-prev.avg>=0?'+':''}${(last.avg-prev.avg).toFixed(2).replace('.',',')} kg)` : '') + '.'); }
   else parts.push('Esta semana apenas hay pesadas: pésate por las mañanas.');
@@ -2157,7 +2211,7 @@ function buildNotifications(){
       else out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t - 30), title:`🍳 ${MEAL_NAME[m]} a las ${fmt(M.t)}`,
         body:`Iría bien ir empezando a cocinar: ${cookList(M.items)}.${M.notes.length ? ' Lleva ajustes por lo de hoy.' : ''}`, tag:'comida', url:'#hoy'});
     }
-    if (av.resumen && wd === 0) out.push({nid:`${k}:resumen`, at:epochAt(k, 11*60), title:'📊 Tu semana', body:weeklySummaryText(), tag:'resumen', url:'#progreso'});
+    if (av.resumen && wd === 0) out.push({nid:`${k}:resumen`, at:epochAt(k, 11*60), title:'📊 Tu semana', body:weeklySummaryText(k), tag:'resumen', url:'#progreso'});
     const falta = Object.keys(S.pantry).filter(id => S.pantry[id] === 'falta' && FOODS[id]);
     if (av.compra && wd === 6 && falta.length) out.push({nid:`${k}:compra`, at:epochAt(k, 10*60), title:'🛒 Toca hacer la compra',
       body:`Te falta${falta.length===1?'':'n'} ${falta.length} cosa${falta.length===1?'':'s'}: ${falta.slice(0,5).map(id => FOODS[id].n.toLowerCase()).join(', ')}${falta.length>5?'…':''}.`, tag:'compra', url:'#compra'});
@@ -2185,6 +2239,11 @@ app.addEventListener('click', async e => {
   else if (a === 'daynext'){ const n = addDays(viewDay(), 1); VIEW = n >= dayKey() ? null : n; window.scrollTo(0,0); render(); }
   else if (a === 'daytoday'){ VIEW = null; window.scrollTo(0,0); render(); }
   else if (a === 'openday'){ VIEW = b.dataset.k; TAB = 'hoy'; history.replaceState(null, '', '#hoy'); window.scrollTo(0,0); render(); }
+  else if (a === 'moveundo'){ // deshace lo movido desde o hacia esta comida (y la de origen, si se había vaciado)
+    const day = getDay(viewDay()), afect = (day.moves || []).filter(x => x.from === m || x.to === m);
+    day.moves = (day.moves || []).filter(x => !afect.includes(x));
+    for (const x of afect){ const o = day.meals[x.from]; if (o && o.status === 'moved') delete day.meals[x.from]; }
+    save(); render(); toast('Movimiento deshecho'); }
   else if (a === 'planreset'){ const day = getDay(viewDay()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
@@ -2202,7 +2261,7 @@ app.addEventListener('click', async e => {
     toast(FOODS[id].n + ' quitado: el plan lo cambia por otra cosa', () => { if (prev) S.pantry[id] = prev; else delete S.pantry[id]; save(); render(); }); }
   else if (a === 'desp-volver'){ delete S.pantry[b.dataset.id]; save(); render(); }
   else if (a === 'saveweight'){ const v = parseFloat(String(document.getElementById('wt').value).replace(',','.')); if (v > 30 && v < 250){ S.weights[dayKey()] = Math.round(v*10)/10; save(); render(); toast('Peso guardado'); } else toast('Peso no válido'); }
-  else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } }
+  else if (a === 'savewaist'){ const v = parseFloat(String(document.getElementById('wa').value).replace(',','.')); if (v > 40 && v < 200){ S.waist[dayKey()] = v; save(); render(); toast('Cintura guardada'); } else toast('Cintura no válida'); }
   else if (a === 'tday'){ const d = +b.dataset.d, s = S.settings; s.trainDays = s.trainDays.includes(d) ? s.trainDays.filter(x=>x!==d) : s.trainDays.concat(d); save(); render(); }
   else if (a === 'theme'){ S.settings.theme = b.dataset.v; save(); render(); }
   else if (a === 'savekey'){ const v = document.getElementById('aikey').value.trim(); if (!v || v.startsWith('•')) return toast('Pega tu API key'); if (!v.startsWith('sk-ant-')) return toast('Eso no parece una key de Anthropic'); try{ localStorage.setItem(AI_KEY, v); }catch(_){} render(); toast('Key guardada en este móvil'); }
@@ -2219,7 +2278,7 @@ app.addEventListener('click', async e => {
       catch(e){ toast('No se pudo restaurar: ' + e.message); }
     });
   });
-  else if (a === 'kcaladj'){ S.settings.kcal = (+S.settings.kcal || 2500) + (+b.dataset.v); save(); render(); toast(`Objetivo: ${S.settings.kcal} kcal. El plan se ha recalculado.`); }
+  else if (a === 'kcaladj'){ setKcal((+S.settings.kcal || 2500) + (+b.dataset.v)); save(); render(); toast(`Objetivo: ${S.settings.kcal} kcal. El plan se ha recalculado.`); }
   else if (a === 'pushon'){ b.disabled = true; try{ await pushOn(); toast('Avisos activados en este móvil'); }catch(err){ toast('No se pudieron activar: ' + (err.message || err)); } render(); }
   else if (a === 'pushoff'){ await pushOff(); render(); toast('Avisos desactivados'); }
   else if (a === 'pushtest'){ const ok = await syncSchedule(true, [{nid:'prueba-' + Date.now(), at:Date.now() + 60e3, title:'🔔 Aviso de prueba', body:'Así te llegarán los avisos, aunque la app esté cerrada. Ciérrala y espera 1–2 minutos.', tag:'prueba', url:'#ajustes'}]); toast(ok ? 'Llegará en 1–2 minutos. Puedes cerrar la app.' : 'No se pudo contactar con el servidor'); }
