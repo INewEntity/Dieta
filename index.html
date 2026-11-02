@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 37;
+const VERSION = 38;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -504,28 +504,37 @@ function schedule(k){
 
 /* ===================== Plan del día y motor de ajuste ===================== */
 function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
-// Escala el plan del día al objetivo: primero la proteína, luego hidratos y grasa.
-// Fruta y verdura no se tocan. El batido entra dentro del total.
+// Objetivos del día: proteína la de Ajustes, grasa ~27 % de las kcal (entre 60 y 85 g) e hidratos el resto.
+// Así un día con menos kcal recorta grasa e hidratos en proporción, en vez de llenarse de la grasa de la carne.
+function dayMacros(kT){
+  const p = +S.settings.prot || 160, f = Math.round(Math.max(60, Math.min(85, kT * 0.27 / 9)));
+  return {k:kT, p, f, c:Math.max(0, Math.round((kT - 4 * p - 9 * f) / 4))};
+}
+// Escala el plan del día a esos objetivos: proteína con la carne y el pescado, grasa con el aceite, el aguacate
+// y los frutos secos, y las kcal con los hidratos. Fruta y verdura no se tocan. El batido entra dentro del total.
 function fitToTarget(plan, kT = kcalBase()){
-  const all = Object.values(plan).flat();
-  const pT = +S.settings.prot || 160;
-  const prot = all.filter(it => FOODS[it.id].g === 'prot');
-  const pProt = prot.reduce((a,it) => a + mac(it.id, it.g).p, 0), pOther = sumItems(all).p - pProt;
-  if (pProt > 0){ const sp = Math.max(0.6, Math.min(1.5, (pT - pOther) / pProt)); prot.forEach(it => it.g = roundG(it.id, it.g * sp)); }
-  const cf = all.filter(it => FOODS[it.id].g === 'carb' || FOODS[it.id].g === 'grasa');
-  const kCF = cf.reduce((a,it) => a + mac(it.id, it.g).k, 0), k1 = sumItems(all).k;
-  if (kCF > 0){ const s = Math.max(0.35, Math.min(1.8, 1 + (kT - k1) / kCF)); cf.forEach(it => it.g = roundG(it.id, it.g * s)); }
+  const all = Object.values(plan).flat(), T = dayMacros(kT);
+  const grp = g => all.filter(it => FOODS[it.id].g === g && !FOODS[it.id].u);
+  const scaleTo = (g, key, want, lo, hi) => {
+    const its = grp(g), own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
+    if (!own) return;
+    const s = Math.max(lo, Math.min(hi, 1 + (want - sumItems(all)[key]) / own));
+    its.forEach(it => it.g = roundG(it.id, it.g * s));
+  };
+  scaleTo('prot', 'p', T.p, 0.6, 1.5);
+  scaleTo('grasa', 'f', T.f, 0, 2);
+  scaleTo('carb', 'k', kT, 0.35, 1.8);
   balanceMeals(plan);
   // Ajuste fino: el redondeo (huevos enteros, gramos de 5 en 5…) deja el día unos gramos fuera del objetivo.
-  // Se corrige la proteína con la carne o el pescado más grande, y las kcal con
-  // todos los hidratos a la vez. Dos pasadas, porque tocar uno mueve un poco el otro.
-  const libre = grp => all.filter(it => FOODS[it.id].g === grp && !FOODS[it.id].u && it.g >= 40 && FOODS[it.id][grp === 'prot' ? 'p' : 'k'] > 0)
-    .sort((a, b) => b.g - a.g)[0];
+  // La proteína se corrige con la carne o el pescado más magro (más proteína por kcal: no mete grasa), la grasa con
+  // el aceite y compañía, y las kcal con todos los hidratos a la vez. Dos pasadas, porque tocar uno mueve los demás.
+  const magro = () => grp('prot').filter(it => it.g >= 40 && FOODS[it.id].p > 0).sort((a, b) => FOODS[b.id].p / FOODS[b.id].k - FOODS[a.id].p / FOODS[a.id].k)[0];
   for (let pass = 0; pass < 2; pass++){
-    const P = libre('prot'), gapP = pT - sumItems(all).p;
+    const P = magro(), gapP = T.p - sumItems(all).p;
     if (P && Math.abs(gapP) >= 1) P.g = Math.max(40, Math.round((P.g + gapP / FOODS[P.id].p * 100) / 5) * 5);
+    if (Math.abs(T.f - sumItems(all).f) >= 3) scaleTo('grasa', 'f', T.f, 0, 2);
     // las kcal se corrigen con todos los hidratos a la vez, para no deshacer el reparto entre comidas
-    const carbs = all.filter(it => FOODS[it.id].g === 'carb'), gapK = kT - sumItems(all).k;
+    const carbs = grp('carb'), gapK = kT - sumItems(all).k;
     const kC = carbs.reduce((a, it) => a + mac(it.id, it.g).k, 0);
     if (kC && Math.abs(gapK) >= 15) carbs.forEach(it => it.g = roundG(it.id, it.g * (1 + gapK / kC)));
   }
@@ -643,7 +652,7 @@ function computeDay(k){
     meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
   }
   // objetivos del día: los de Ajustes (la suma del plan puede desviarse algo con intercambios y redondeos)
-  const comp = dayKcal(k), TK = comp.k, TP = +S.settings.prot || target.p;
+  const comp = dayKcal(k), TK = comp.k, OBJ = dayMacros(TK), TP = OBJ.p;
   const pending = sch.order.filter(m => meals[m].status === 'pending' && !meals[m].merged && !meals[m].locked);
   const locked = sch.order.filter(m => meals[m].locked);
   const tips = [];
@@ -660,26 +669,41 @@ function computeDay(k){
     bal = addM(bal, copas);
     tips.push({cls:'', html:`🍸 <b>${copas.n} copa${copas.n === 1 ? '' : 's'} ≈ ${R(copas.k)} kcal</b>. Les hago sitio recortando hidratos y grasa del resto del día, sin tocar la proteína. Lo que no quepa se compensa en lo que queda de semana. Antes de salir, cena con proteína y bebe agua entre copa y copa.`});
   }
-  // 1) Proteína: recuperar lo que falte
+  // La proteína que falte por lo ya comido la recupera el repaso final (primero con la carne y el pescado que
+  // quedan, luego con extras); aquí solo se avisa si es algo que merezca la pena.
   const deficitP = -bal.p;
-  if (deficitP > 2 && pending.length){
-    let left = deficitP;
-    pending.forEach((m, i) => {
-      const want = Math.min(PROT_EXTRA - meals[m].protAdded, left / (pending.length - i));
-      if (want < 3) return;
-      const got = boostProtein(meals[m], want);
-      meals[m].protAdded += got.p;
-      added = addM(added, got); left -= got.p;
-    });
-    tips.push({cls:'', html:`Te faltaban <b>${R(deficitP)} g de proteína</b> por lo que ha pasado antes. Lo he repartido en lo que queda del día.`});
+  if (deficitP > 8 && pending.length) tips.push({cls:'', html:`Te faltaban <b>${R(deficitP)} g de proteína</b> por lo que ha pasado antes. Lo he repartido en lo que queda del día.`});
+  // Recortar hidratos respeta unos mínimos: la comida de después de entrenar conserva al menos el 70 % de los suyos
+  // (los recortes salen antes de las demás), las comidas principales no bajan de 30 g y el batido no baja del 40 %.
+  const tr = sch.tr, postEntreno = tr.on ? sch.order.find(m => !meals[m].merged && meals[m].t >= tr.start + tr.dur) : null;
+  function carbDown(ms, cut){
+    const its = M => M.items.filter(it => FOODS[it.id].g === 'carb' && !it.fromBatido && !FOODS[it.id].u);
+    const kOf = (xs, orig) => xs.reduce((a, it) => a + mac(it.id, orig ? (it.orig ?? it.g) : it.g).k, 0);
+    let got = 0;
+    for (const fase of [ms.filter(M => M.key !== postEntreno), ms.filter(M => M.key === postEntreno)]){
+      const info = fase.map(M => {
+        const xs = its(M), k = kOf(xs), c = xs.reduce((a, it) => a + mac(it.id, it.g).c, 0);
+        const minK = M.key === postEntreno ? 0.7 * kOf(xs, true)
+          : M.key === 'merienda' ? 0.4 * kOf(xs, true) : (c > 0 ? k * Math.min(1, 30 / c) : k);
+        return {M, xs, k, libre: Math.max(0, k - minK)};
+      });
+      const libre = info.reduce((a, x) => a + x.libre, 0), quiero = Math.min(cut - got, libre);
+      if (quiero < 10) continue;
+      info.forEach(x => {
+        if (!x.libre || !x.k) return;
+        const f = 1 - quiero * x.libre / libre / x.k;
+        x.xs.forEach(it => { const before = it.g, g = roundG(it.id, it.g * f); if (g !== before){ it.orig = it.orig ?? before; it.g = g; got += mac(it.id, before).k - mac(it.id, g).k; } });
+      });
+    }
+    return got;
   }
-  // 2) Calorías: las ajusta el repaso final, al gramo, en lo que queda del día
-  // Recorta kcal de lo que queda, de lo más prescindible a lo menos: hidratos (dejando algo), grasa, fruta,
-  // la leche del batido, el resto de hidratos y, si se permite, la proteína que sobre del objetivo. Nunca la verdura.
+  // Recorta kcal de lo que queda, de lo más prescindible a lo menos: hidratos (hasta sus mínimos), grasa, fruta,
+  // la leche del batido y, si se permite, la proteína que sobre del objetivo. Nunca la verdura.
   function trimSurplus(ms, cut, conProteina){
     let got = ZERO; const hecho = [];
     const paso = (grp, frac, nombre) => { if (cut <= 30) return; const g = scaleGroup(ms, grp, -cut, frac); if (g.k < -5){ got = addM(got, g); cut += g.k; if (!hecho.includes(nombre)) hecho.push(nombre); } };
-    paso('carb', 0.6, 'hidratos'); paso('grasa', 1, 'grasa'); paso('fruta', 1, 'fruta'); paso('liq', 1, 'la leche del batido'); paso('carb', 1, 'hidratos');
+    if (cut > 30){ const g = carbDown(ms, cut); if (g > 5){ got = addM(got, {k:-g, p:0, c:-g / 4, f:0}); cut -= g; hecho.push('hidratos'); } }
+    paso('grasa', 1, 'grasa'); paso('fruta', 0.5, 'fruta'); paso('liq', 1, 'la leche del batido'); // la fruta, como mucho a la mitad
     let prot = false;
     if (conProteina && cut > 30){
       const pendP = ms.reduce((a, M) => a + sumItems(M.items).p, 0) + locked.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
@@ -723,7 +747,9 @@ function computeDay(k){
     {
       const ms = pendLeft.map(m => meals[m]);
       const fit = (grp, key, gap, min, lo, hi, solo = ms) => {
-        const its = solo.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
+        let its = solo.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
+        // para subir proteína, mejor con lo magro (pollo, pescado blanco, atún…) que con la ternera o el salmón
+        if (grp === 'prot' && gap > 0 && its.some(it => esMagro(it.id))) its = its.filter(it => esMagro(it.id));
         const own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
         if (!own || Math.abs(gap) < min) return; // menos que esto es redondeo: no se toca
         const f = Math.max(lo, Math.min(hi, 1 + gap / own));
@@ -731,9 +757,10 @@ function computeDay(k){
       };
       const k0 = sumRest('k');
       fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25);
-      fit('grasa', 'f', target.f - consumed.f - sumRest('f'), 3, 0, 2);
+      fit('grasa', 'f', OBJ.f - consumed.f - sumRest('f'), 3, 0, 2);
       const gapK = TK - consumed.k - copas.k - sumRest('k');
-      fit('carb', 'k', gapK, 25, 0.4, 1.3, gapK > 0 ? ms.filter(M => !(M.key === 'cena' && M.t >= late)) : ms);
+      if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, ms.filter(M => !(M.key === 'cena' && M.t >= late)));
+      else if (gapK < -25) carbDown(ms, -gapK);
       fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25); // el pan, la pasta o la avena también traen proteína
       const dk = sumRest('k') - k0;
       if (dk < -60 && !copas.k) tips.push({cls:'amber', html:`Con lo apuntado ibas <b>${R(-dk)} kcal por encima</b>. He ajustado lo que queda (menos hidratos y grasa), sin bajar de tu proteína.`});
@@ -744,7 +771,8 @@ function computeDay(k){
       const over = consumed.k + copas.k + sumRest('k') - TK;
       if (over > 40){
         const r = trimSurplus(pendLeft.map(m => meals[m]), over, true);
-        if (!copas.k && !tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.${r.left > 150 ? ` Aun así quedas ${R(r.left)} kcal por encima: no pasa nada, mañana normal.` : ''}`});
+        if (!copas.k && !tips.some(t => t.cls === 'amber') && over - r.left > 60) tips.push({cls:'amber', html:`Vas <b>${R(over)} kcal por encima</b> de tu objetivo. He recortado ${r.what} de lo que queda.`});
+        if (r.left > 150) tips.push({cls:'', html:`Aun así quedas <b>${R(r.left)} kcal por encima</b>: no recorto más para no dejar las comidas sin hidratos. Se compensa en lo que queda de semana.`});
         fillProt(); // recortar hidratos también quita algo de proteína (pan, pasta, avena): se repone
       } else if (over < -150){
         tips.push({cls:'', html:`Aun así te quedan <b>${R(-over)} kcal</b> por debajo: no caben sin cargar demasiado lo que queda. Se compensan en lo que queda de semana.`});
@@ -757,10 +785,11 @@ function computeDay(k){
   if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b> para tus estadísticas (medias, % del plan, proteína), pero no se olvida: ha existido y se comió lo que se comió, así que al valorar tu peso de estos días se tiene en cuenta que ha pasado algo. No se compensa, porque no se sabe si fue de más o de menos.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
-  return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, comp, copas};
+  return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, OBJ, comp, copas};
 }
 function computeSchedule(k){ return schedule(k); }
 
+const esMagro = id => FOODS[id].f <= FOODS[id].p * 0.5; // menos de 0,5 g de grasa por g de proteína
 function boostProtein(meal, wantP){
   const items = meal.items;
   if (meal.key === 'desayuno'){
@@ -786,7 +815,8 @@ function boostProtein(meal, wantP){
     }
     return got;
   }
-  const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
+  // el plato principal solo crece si es magro; si es ternera, salmón o sardinas, la proteína va en un extra magro
+  const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido && esMagro(x.id)).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
   let got = ZERO;
   if (main){
     // el plato principal crece como mucho un 60 %; el resto va en un extra
@@ -884,7 +914,7 @@ function renderHoy(){
     <div><div class="lbl">Calorías</div><div class="big num">${R(kC)}<span class="muted" style="font-size:20px"> / ${R(kT)}</span></div>
       <div class="bar k"><i style="width:${Math.min(100, kC/kT*100)}%"></i></div>
       <div class="small">${kTxt}</div>${finTxt(fin && fin.k, ' kcal')}</div>
-    <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.target.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.target.f)} g</span></div>
+    <div class="macros num"><span>Hidratos ${R(D.consumed.c)}/${R(D.OBJ.c)} g</span><span>Grasa ${R(D.consumed.f)}/${R(D.OBJ.f)} g</span></div>
   </section>`;
   // avisos inteligentes
   const tips = D.tips.slice();
@@ -1493,7 +1523,7 @@ function sheetAIReview(m, r, at){
 const enCasa = id => !noHay(id) && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
 function coachContext(m){
   const D = computeDay(viewDay()), M = D.meals[m];
-  const T = {k: D.TK, p: +S.settings.prot || D.target.p, c: D.target.c, f: D.target.f};
+  const T = {k: D.TK, p: D.OBJ.p, c: D.OBJ.c, f: D.OBJ.f};
   const otras = D.sch.order.filter(x => x !== m && D.meals[x].status === 'pending' && !D.meals[x].merged)
     .reduce((a, x) => addM(a, sumItems(D.meals[x].items)), ZERO);
   const cubrir = addM(addM(T, D.consumed, -1), otras, -1);
