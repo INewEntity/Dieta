@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 39;
+const VERSION = 40;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1315,8 +1315,11 @@ function sheetWake(){
 }
 
 function sheetTrain(){
-  const k = viewDay(), day = getDay(k), tr = trainOf(k);
+  const k = viewDay(), day = getDay(k), tr = trainOf(k), hoy = k === dayKey(), now = nowMin();
+  // si pusiste la hora de inicio (o diste a «Empiezo ahora») hace menos de 4 h, al acabar cuenta lo que has tardado de verdad
+  const empezado = hoy && tr.on && !!(day.train && day.train.time) && tr.start <= now && now - tr.start <= 240;
   sheet(`<h2>Entreno de hoy</h2><div class="sub">${tr.on ? 'Previsto a las ' + fmt(tr.start) : 'Hoy no hay entreno previsto'}. Cambia lo que haga falta.</div>
+    ${hoy ? `<div class="evactions" style="margin:0 0 12px"><button class="btn" data-x="ahora">▶️ Empiezo ahora</button><button class="btn pri" data-x="fin">🏁 Acabo de terminar</button></div>` : ''}
     <div class="seg" style="margin-bottom:12px"><button data-x="on" class="${tr.on?'on':''}">Entreno hoy</button><button data-x="off" class="${!tr.on?'on':''}">Descanso</button></div>
     <div ${tr.on?'':'hidden'} id="trbox">
       <label class="f">Hora de inicio</label>${timeInput('tt', tr.start)}
@@ -1330,6 +1333,16 @@ function sheetTrain(){
       day.train = day.train || {};
       if (x.dataset.x === 'on'){ day.train.on = true; save(); closeSheet(); render(); return sheetTrain(); }
       if (x.dataset.x === 'off'){ day.train.on = false; day.train.done = false; save(); closeSheet(); render(); toast('Hoy descanso'); return; }
+      if (x.dataset.x === 'ahora'){
+        Object.assign(day.train, {on:true, time:fmt(now), dur, done:false}); save(); closeSheet(); render();
+        return toast(`Entreno a las ${fmt(now)}: he recolocado el día`);
+      }
+      if (x.dataset.x === 'fin'){
+        // sin hora de inicio, se da por hecho que has entrenado lo de siempre hasta ahora
+        const ini = empezado ? tr.start : Math.max(300, now - dur), real = empezado ? Math.max(15, Math.round((now - tr.start) / 5) * 5) : now - ini;
+        Object.assign(day.train, {on:true, time:fmt(ini), dur:real, done:true}); save(); closeSheet(); render();
+        return toast(`Entreno registrado: ${fmt(ini)}–${fmt(ini + real)}`);
+      }
       day.train.on = true; day.train.time = el.querySelector('#tt').value; day.train.dur = dur;
       if (x.dataset.x === 'done') day.train.done = !tr.done;
       save(); closeSheet(); render();
