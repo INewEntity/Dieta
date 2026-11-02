@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 36;
+const VERSION = 37;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -478,13 +478,18 @@ function schedule(k){
       out[m] = {t, status:'pending'}; prev = t; pm = m;
     }
   }
-  // si no cabe todo antes del límite, el batido se toma con la cena
-  const limit = toMin(S.settings.dinnerLimit), C = out.cena;
-  if (out.merienda && out.merienda.status === 'pending' && C.status === 'pending' && C.t >= limit){
-    out.merienda.merged = true;
-    const p = prevOf.merienda;
-    C.t = p != null ? Math.max(wantAdv('cena'), p + gapTras(prevMeal.merienda)) : want.cena;
-    prevOf.cena = p; prevMeal.cena = prevMeal.merienda;
+  // si el retraso empuja la cena más allá de su hora, primero se acercan el batido y la cena (hora y media tras la
+  // comida y otra hora y media hasta la cena: es líquido); solo si ni así cabe la cena antes del límite, el batido
+  // se toma con la cena
+  const limit = toMin(S.settings.dinnerLimit), C = out.cena, B = out.merienda;
+  if (B && B.status === 'pending' && C.status === 'pending' && C.t > wantAdv('cena')){
+    const p = prevOf.merienda, c2 = p != null ? Math.max(wantAdv('cena'), p + 2 * GAP_BATIDO) : Infinity;
+    if (c2 <= limit){ if (c2 < C.t){ C.t = c2; B.t = c2 - GAP_BATIDO; prevOf.cena = B.t; } }
+    else {
+      B.merged = true;
+      C.t = p != null ? Math.max(wantAdv('cena'), p + gapTras(prevMeal.merienda)) : want.cena;
+      prevOf.cena = p; prevMeal.cena = prevMeal.merienda;
+    }
   }
   // si aun así la cena pasa del límite, se acorta la espera (2 h tras una comida, 1 h tras el batido)
   // y nunca se cena a menos de 1 hora de acostarse
