@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 41;
+const VERSION = 42;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -207,7 +207,7 @@ const ALTS = {
   prot:['pollo','pavo','atun','merluza','ternera','salmon','sardinas','claras','huevo','quesob','yogurp','whey'],
   carb:['arroz','pasta','patata','pan','avena','batata','garbanzos'],
   fruta:['platano','naranja','manzana'],
-  verd:['zanahoria','pepino','tomtrit','brocoli','judias','ensalada'],
+  verd:['zanahoria','tomtrit'], // solo las dos que come (03/11/2026)
   grasa:['aove','aguacate','nueces'],
   liq:['leche','agua'],
 };
@@ -218,18 +218,19 @@ const DESAYUNO = [['huevo',220],['pan',100],['platano',120],['nueces',15]];
 const BATIDO = [['whey',30],['leche',250],['avena',40]];
 // desde este día el batido va todos los días (antes, solo los de entreno; el historial anterior no cambia)
 const BATIDO_DIARIO = '2026-10-28';
+// Verdura: solo zanahoria y tomate triturado. Se cambian en el mismo sitio (los intercambios guardados van por posición).
 const ALM = {
-  pollo_arroz:[['pollo',200],['arroz',100],['pepino',150],['zanahoria',100],['aove',10],['naranja',150]],
+  pollo_arroz:[['pollo',200],['arroz',100],['tomtrit',150],['zanahoria',100],['aove',10],['naranja',150]],
   ternera_pasta:[['ternera',180],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
   pollo_garbanzos:[['pollo',180],['arroz',70],['garbanzos',200],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
-  pollo_pasta:[['pollo',200],['pasta',100],['tomtrit',150],['pepino',150],['aove',5],['naranja',150]],
+  pollo_pasta:[['pollo',200],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
 };
 const CEN = {
-  salmon:[['huevo',165],['salmon',150],['patata',550],['zanahoria',100],['aove',10],['pepino',150]],
-  atun:[['huevo',165],['atun',150],['patata',450],['zanahoria',100],['aguacate',50],['pepino',150]],
-  merluza:[['huevo',165],['merluza',125],['patata',550],['zanahoria',100],['aove',10],['pepino',150]],
-  pollo:[['huevo',165],['pollo',150],['patata',500],['zanahoria',100],['aove',10],['pepino',150]],
-  merluza_dom:[['huevo',110],['merluza',125],['patata',550],['zanahoria',100],['aove',10],['pepino',150]],
+  salmon:[['huevo',165],['salmon',150],['patata',550],['zanahoria',100],['aove',10]],
+  atun:[['huevo',165],['atun',150],['patata',450],['zanahoria',100],['aguacate',50]],
+  merluza:[['huevo',165],['merluza',125],['patata',550],['zanahoria',100],['aove',10]],
+  pollo:[['huevo',165],['pollo',150],['patata',500],['zanahoria',100],['aove',10]],
+  merluza_dom:[['huevo',110],['merluza',125],['patata',550],['zanahoria',100],['aove',10]],
 };
 // 0 = domingo
 const WEEK = {
