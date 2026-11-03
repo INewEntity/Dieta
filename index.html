@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 42;
+const VERSION = 43;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -218,9 +218,9 @@ const DESAYUNO = [['huevo',220],['pan',100],['platano',120],['nueces',15]];
 const BATIDO = [['whey',30],['leche',250],['avena',40]];
 // desde este día el batido va todos los días (antes, solo los de entreno; el historial anterior no cambia)
 const BATIDO_DIARIO = '2026-10-28';
-// Verdura: solo zanahoria y tomate triturado. Se cambian en el mismo sitio (los intercambios guardados van por posición).
+// Verdura: solo zanahoria y tomate triturado; el tomate, solo donde hace de salsa (pasta y garbanzos).
 const ALM = {
-  pollo_arroz:[['pollo',200],['arroz',100],['tomtrit',150],['zanahoria',100],['aove',10],['naranja',150]],
+  pollo_arroz:[['pollo',200],['arroz',100],['zanahoria',100],['aove',10],['naranja',150]],
   ternera_pasta:[['ternera',180],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
   pollo_garbanzos:[['pollo',180],['arroz',70],['garbanzos',200],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
   pollo_pasta:[['pollo',200],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
@@ -604,8 +604,9 @@ function basePlan(k, sch, opts = {}){
   for (const m in plan){
     const sw = (day.swaps || {})[m] || {};
     plan[m] = plan[m].map((it, i) => {
+      // el cambio va por posición: si el menú base cambió y en ese sitio hay otro tipo de alimento, no se aplica
       const to = sw[i] && sw[i].id;
-      if (to && to !== it.id) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
+      if (to && to !== it.id && FOODS[to] && FOODS[to].g === FOODS[it.id].g) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
       if (noHay(it.id)){
         // primero algo del mismo grupo que tengas en casa (despensa), luego los alimentos base
         const g = FOODS[it.id].g, key = GROUP_KEY[g] || 'k';
