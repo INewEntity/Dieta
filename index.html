@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 43;
+const VERSION = 44;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -672,6 +672,8 @@ function consumedOf(log){
   return t;
 }
 
+// ¿cantidad fijada a mano? (las copias anteriores a la v44 no llevan la marca: van enteras fijas)
+const esFijo = (pe, x) => x.fijo ?? !pe.some(y => 'fijo' in y);
 function computeDay(k){
   const day = getDay(k), sch = computeSchedule(k), plan = basePlan(k, sch);
   let target = ZERO, consumed = ZERO, bal = ZERO;
@@ -685,11 +687,42 @@ function computeDay(k){
       const c = consumedOf(log); consumed = addM(consumed, c); bal = addM(bal, addM(c, planned, -1));
       meals[m].items = (log.items || []).map(x=>Object.assign({}, x));
     } else if (day.planEdit && day.planEdit[m] && !t.merged){
-      // cantidades fijadas a mano en una comida que aún no has hecho: se respetan tal cual
-      // y la diferencia con el plan la absorben las demás comidas pendientes
-      const own = day.planEdit[m].filter(x => FOODS[x.id] && x.g > 0).map(x => ({id:x.id, g:x.g}));
-      meals[m].items = own; meals[m].locked = true;
-      bal = addM(bal, addM(sumItems(own), planned, -1));
+      // cantidades cambiadas a mano en una comida que aún no has hecho: lo que has tocado tú (fijo) se respeta tal
+      // cual y lo demás de esa comida se recoloca para compensarlo; lo que no quepa ahí lo absorben las demás comidas
+      const pe = day.planEdit[m].filter(x => FOODS[x.id] && x.g > 0);
+      meals[m].editado = true;
+      if (pe.every(x => esFijo(day.planEdit[m], x))){
+        const own = pe.map(x => Object.assign({id:x.id, g:x.g, fijo:true}, x.mf ? {mf:x.mf} : {}));
+        meals[m].items = own; meals[m].locked = true;
+        bal = addM(bal, addM(sumItems(own), planned, -1));
+      } else {
+        // lo que se ha pasado a otra comida con «mover» ya no cuenta en esta
+        const ref = plan[m].map(x => Object.assign({}, x));
+        const fuera = (day.moves || []).filter(mv => mv.from === m && mv.sacar).map(mv => mv.id);
+        const quita = xs => fuera.forEach(id => { const j = xs.findIndex(x => x.id === id && !x.mf); if (j >= 0) xs.splice(j, 1); });
+        quita(ref);
+        const enPlan = {}; ref.forEach(x => enPlan[x.id] = x.g);
+        // lo libre parte de la cantidad del plan de ahora; los extras que puso el ajuste se vuelven a calcular
+        const items = pe.filter(x => x.fijo || !x.added).map(x => x.fijo ? Object.assign({id:x.id, g:x.g, fijo:true}, x.mf ? {mf:x.mf} : {})
+          : x.mf ? {id:x.id, g:x.g, mf:x.mf} : {id:x.id, g:enPlan[x.id] ?? x.g});
+        quita(items);
+        // la comida vuelve a lo que aportaba en el plan con lo que no has tocado: proteína con la carne o el pescado
+        // (lo magro primero), grasa con el aceite y compañía, y las kcal con los hidratos
+        const ajusta = (grp, key, min, lo, hi) => {
+          const gap = sumItems(ref)[key] - sumItems(items.filter(x => !x.mf))[key];
+          let its = items.filter(x => !x.fijo && !x.mf && FOODS[x.id].g === grp && !FOODS[x.id].u);
+          if (grp === 'prot' && gap > 0 && its.some(x => esMagro(x.id))) its = its.filter(x => esMagro(x.id));
+          const own = its.reduce((a, x) => a + mac(x.id, x.g)[key], 0);
+          if (!own || Math.abs(gap) < min) return;
+          const f = Math.max(lo, Math.min(hi, 1 + gap / own));
+          its.forEach(x => { const g = roundG(x.id, x.g * f); if (g !== x.g){ x.orig = x.orig ?? x.g; x.g = g; } });
+        };
+        ajusta('prot', 'p', 2, 0.5, 1.6);
+        ajusta('grasa', 'f', 2, 0, 2.5);
+        ajusta('carb', 'k', 15, 0.4, 1.6);
+        meals[m].items = items;
+        bal = addM(bal, addM(sumItems(items), planned, -1));
+      }
     }
   }
   // alimentos movidos de una comida a otra (pulsación larga): salen de una y entran en la otra antes de ajustar el
@@ -698,7 +731,7 @@ function computeDay(k){
     const A = meals[mv.from], B = meals[mv.to]; if (!A || !B) continue;
     let it = null;
     if (mv.sacar && A.status === 'pending' && !A.locked){ const j = A.items.findIndex(x => x.id === mv.id && !x.mf); if (j >= 0) [it] = A.items.splice(j, 1); }
-    if (mv.poner && B.status === 'pending' && !B.locked){
+    if (mv.poner && B.status === 'pending' && !B.locked && !B.items.some(x => x.mf === mv.from && x.id === mv.id)){
       const g = it ? it.g : mv.g;
       B.items.push({id:mv.id, g, mf:mv.from});
       if (A.status !== 'pending') bal = addM(bal, mac(mv.id, g)); // la comida de origen ya no lo aporta: lo aporta esta
@@ -738,7 +771,7 @@ function computeDay(k){
   // (los recortes salen antes de las demás), las comidas principales no bajan de 30 g y el batido no baja del 40 %.
   const tr = sch.tr, postEntreno = tr.on ? sch.order.filter(m => !meals[m].merged && meals[m].t >= tr.start + tr.dur).sort((a, b) => meals[a].t - meals[b].t)[0] : null;
   function carbDown(ms, cut){
-    const its = M => M.items.filter(it => FOODS[it.id].g === 'carb' && !it.fromBatido && !FOODS[it.id].u);
+    const its = M => M.items.filter(it => FOODS[it.id].g === 'carb' && !it.fromBatido && !FOODS[it.id].u && !it.fijo);
     const kOf = (xs, orig) => xs.reduce((a, it) => a + mac(it.id, orig ? (it.orig ?? it.g) : it.g).k, 0);
     let got = 0;
     for (const fase of [ms.filter(M => M.key !== postEntreno), ms.filter(M => M.key === postEntreno)]){
@@ -769,7 +802,7 @@ function computeDay(k){
     if (conProteina && cut > 30){
       const pendP = ms.reduce((a, M) => a + sumItems(M.items).p, 0) + locked.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
       const spareP = consumed.p + pendP - TP;
-      const protIt = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido));
+      const protIt = ms.flatMap(M => M.items.filter(it => FOODS[it.id].g === 'prot' && !it.fromBatido && !it.fijo));
       const pk = protIt.reduce((a,it) => a + mac(it.id,it.g).k, 0), pp = protIt.reduce((a,it) => a + mac(it.id,it.g).p, 0);
       if (spareP > 8 && pp > 0){ const g = scaleGroup(ms, 'prot', -Math.min(cut, spareP * pk / pp), 0.5); got = addM(got, g); cut += g.k; prot = g.k < 0; if (prot) hecho.push('la proteína que te sobraba'); }
     }
@@ -779,7 +812,7 @@ function computeDay(k){
   // 3) Cena tardía (salvo que sea la comida de después de entrenar: ahí los hidratos hacen falta)
   const late = toMin(S.settings.lateDinner);
   if (meals.cena.status === 'pending' && !meals.cena.locked && meals.cena.t >= late && postEntreno !== 'cena'){
-    const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb').reduce((a,x)=>a+mac(x.id,x.g).k,0);
+    const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb' && !x.fijo).reduce((a,x)=>a+mac(x.id,x.g).k,0);
     const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
     added = addM(added, got);
     meals.cena.notes.push(`<b>Cena tardía</b>: misma proteína y un 40 % menos de hidratos para dormir mejor.`);
@@ -808,7 +841,7 @@ function computeDay(k){
     {
       const ms = pendLeft.map(m => meals[m]);
       const fit = (grp, key, gap, min, lo, hi, solo = ms) => {
-        let its = solo.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u));
+        let its = solo.flatMap(M => M.items.filter(it => FOODS[it.id].g === grp && !it.fromBatido && !FOODS[it.id].u && !it.fijo));
         // para subir proteína, mejor con lo magro (pollo, pescado blanco, atún…) que con la ternera o el salmón
         if (grp === 'prot' && gap > 0 && its.some(it => esMagro(it.id))) its = its.filter(it => esMagro(it.id));
         const own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
@@ -846,6 +879,7 @@ function computeDay(k){
   if (day.nocuenta) tips.unshift({cls:'amber', html:'<b>Este día no cuenta</b> para tus estadísticas (medias, % del plan, proteína), pero no se olvida: ha existido y se comió lo que se comió, así que al valorar tu peso de estos días se tiene en cuenta que ha pasado algo. No se compensa, porque no se sabe si fue de más o de menos.'});
   const remainingPlan = pending.concat(locked).reduce((a,m)=>addM(a, sumItems(meals[m].items)), ZERO);
   locked.forEach(m => meals[m].notes.unshift('✋ Cantidades fijadas por ti: el resto del día se ajusta a ellas.'));
+  pending.filter(m => meals[m].editado).forEach(m => meals[m].notes.unshift('✋ Lo que has cambiado a mano se queda fijo; lo demás de esta comida y del día se ajusta.'));
   return {k, sch, meals, target, consumed, remainingPlan, tips, nocuenta: !!day.nocuenta, bal, TK, OBJ, comp, copas};
 }
 function computeSchedule(k){ return schedule(k); }
@@ -862,7 +896,7 @@ function boostProtein(meal, wantP){
   if (meal.key === 'merienda'){
     // primero más proteína en polvo (hasta +20 g), luego un yogur proteico si aún falta
     let got = ZERO;
-    const w = items.find(x => x.id === 'whey');
+    const w = items.find(x => x.id === 'whey' && !x.fijo);
     if (w){
       const before = w.g, g = Math.min(before + 20, roundG('whey', before + wantP / FOODS.whey.p * 100));
       if (g > before){ w.orig = w.orig ?? before; w.g = g; got = mac('whey', g - before); meal.notes.push(`+${g - before} g de proteína en polvo en el batido.`); }
@@ -877,7 +911,7 @@ function boostProtein(meal, wantP){
     return got;
   }
   // el plato principal solo crece si es magro; si es ternera, salmón o sardinas, la proteína va en un extra magro
-  const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido && esMagro(x.id)).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
+  const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido && !x.fijo && esMagro(x.id)).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
   let got = ZERO;
   if (main){
     // el plato principal crece como mucho un 60 %; el resto va en un extra
@@ -904,7 +938,7 @@ const PROT_EXTRA = 25;
 // Al subir, el tope cuenta desde la cantidad del plan, aunque se llame varias veces.
 function scaleGroup(meals, grp, deltaK, maxFrac){
   const cands = [];
-  meals.forEach(m => m.items.forEach(it => { if (FOODS[it.id].g === grp && !it.fromBatido) cands.push(it); }));
+  meals.forEach(m => m.items.forEach(it => { if (FOODS[it.id].g === grp && !it.fromBatido && !it.fijo) cands.push(it); }));
   const totK = cands.reduce((a,it)=>a+mac(it.id,it.g).k,0);
   if (!totK) return ZERO;
   let frac = deltaK / totK;
@@ -1033,14 +1067,14 @@ function mealCard(M, now){
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
       const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>'
         : it.mf ? ` <span class="muted" style="font-size:12px">(de ${MEAL_NAME[it.mf].toLowerCase()})</span>` : '';
-      const name = esc(dispName(it.id)) + sub;
+      const name = esc(dispName(it.id)) + sub + (it.fijo && !M.locked ? ' <span class="muted" style="font-size:12px" title="Cantidad fijada por ti">✋</span>' : '');
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
       const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
       return st === 'pending' && !it.fromBatido
         ? `<li class="${cls}${it.added || it.mf ? '' : ' mv'}" ${it.added || it.mf ? '' : `data-move="${M.key}" data-i="${i}"`}>${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<button class="amt num qamt" data-act="qtyset" data-m="${M.key}" data-i="${i}" aria-label="Escribir la cantidad de ${esc(dispName(it.id))}">${amt}</button>${stp(1)}</span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
     }).join('')}</ul>`;
-  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.locked ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}${M.movido ? ` <button class="stp-reset" data-act="moveundo" data-m="${M.key}">Deshacer el movimiento</button>` : ''}</div>` : '';
+  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.editado ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}${M.movido ? ` <button class="stp-reset" data-act="moveundo" data-m="${M.key}">Deshacer el movimiento</button>` : ''}</div>` : '';
   const actions = st === 'pending'
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="foto" data-m="${M.key}" aria-label="Foto de lo que he comido">📷</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
@@ -1049,11 +1083,14 @@ function mealCard(M, now){
 }
 
 /* ===================== Acciones de comidas ===================== */
-// Cantidades fijadas a mano en una comida pendiente (day.planEdit[m]). La primera vez se copia lo que se ve.
+// Cantidades cambiadas a mano en una comida pendiente (day.planEdit[m]). Se copia lo que se ve, con la marca «fijo»
+// en lo que has tocado tú: eso se respeta y lo demás de la comida se sigue ajustando solo. Las copias de antes de
+// la v44 no llevan la marca y se quedan enteras fijas, como estaban (esFijo).
 function planItems(m){
   const day = getDay(viewDay());
+  const shown = computeDay(viewDay()).meals[m].items.filter(x => !x.fromBatido);
   day.planEdit = day.planEdit || {};
-  if (!day.planEdit[m]) day.planEdit[m] = computeDay(viewDay()).meals[m].items.filter(x => !x.fromBatido).map(x => ({id:x.id, g:x.g}));
+  day.planEdit[m] = shown.map(x => Object.assign({id:x.id, g:x.g, fijo:!!x.fijo}, x.added ? {added:true} : {}, x.mf ? {mf:x.mf} : {}));
   return day.planEdit[m];
 }
 function qtyStep(id, g){ const F = FOODS[id]; return F.u ? F.u : g < 60 ? 5 : g < 200 ? 10 : 25; }
@@ -1061,6 +1098,7 @@ function changeQty(m, i, dir){
   const items = planItems(m), it = items[i]; if (!it) return;
   const step = qtyStep(it.id, it.g);
   it.g = Math.max(0, FOODS[it.id].u ? Math.round(it.g / step) * step + dir * step : Math.round((it.g + dir * step) / 5) * 5);
+  it.fijo = true;
   if (it.g <= 0){ items.splice(i, 1); toast(FOODS[it.id].n + ' quitado de esta comida'); }
   save(); render();
 }
@@ -1077,7 +1115,7 @@ function sheetQty(m, i){
       if (!(v >= 0)) return toast('Escribe un número');
       const items = planItems(m);
       if (v === 0){ items.splice(i, 1); toast(F.n + ' quitado de esta comida'); }
-      else items[i].g = F.u ? Math.round(v) * F.u : Math.round(v);
+      else { items[i].g = F.u ? Math.round(v) * F.u : Math.round(v); items[i].fijo = true; }
       save(); closeSheet(); render();
     };
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
@@ -1149,7 +1187,7 @@ function foodResults(el, sel, ids, extraHtml = () => ''){
 // mode 'log' = registrar lo que has comido · 'plan' = fijar lo que vas a comer, sin marcarla como hecha
 function sheetEdit(m, init = null, mode = 'log'){
   const k = viewDay(), D = computeDay(k), plan = mode === 'plan';
-  let items = init || D.meals[m].items.filter(x => !(plan && x.fromBatido)).map(x => ({id:x.id, g:x.g}));
+  let items = init || D.meals[m].items.filter(x => !(plan && x.fromBatido)).map(x => Object.assign({id:x.id, g:x.g, g0:x.g, fijo:!!x.fijo}, x.added ? {added:true} : {}, x.mf ? {mf:x.mf} : {}));
   const sum = el => { const t = sumItems(items); el.querySelector('#edsum').textContent = `${R(t.k)} kcal · ${R(t.p)} g proteína`; };
   const draw = el => {
     el.querySelector('#ed').innerHTML = items.map((it,i)=>{
@@ -1177,17 +1215,17 @@ function sheetEdit(m, init = null, mode = 'log'){
     el.addEventListener('click', e => {
       if (e.target.dataset.del != null){ items.splice(+e.target.dataset.del, 1); draw(el); return; }
       const p = e.target.closest('[data-pick]');
-      if (p){ const id = p.dataset.pick; useMDB(id); items.push({id, g: FOODS[id].u || 100}); el.querySelector('#addq').value = ''; el.querySelector('#addres').innerHTML = ''; draw(el); return; }
+      if (p){ const id = p.dataset.pick; useMDB(id); items.push({id, g: FOODS[id].u || 100, fijo:true}); el.querySelector('#addq').value = ''; el.querySelector('#addres').innerHTML = ''; draw(el); return; }
       const x = e.target.closest('[data-x]'); if (!x) return;
-      if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100}), mode));
+      if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100, fijo:true}), mode));
       if (x.dataset.x === 'cancel') closeSheet();
       if (x.dataset.x === 'ok' && plan){
         const day = getDay(k); day.planEdit = day.planEdit || {};
-        day.planEdit[m] = items.filter(i => i.g > 0);
+        day.planEdit[m] = items.filter(i => i.g > 0).map(i => Object.assign({id:i.id, g:i.g, fijo:!!(i.fijo || i.g0 == null || i.g !== i.g0)}, i.added ? {added:true} : {}, i.mf ? {mf:i.mf} : {}));
         day.planEdit[m].forEach(i => { if (FOODS[i.id].mid) keepFood(i.id); });
         save(); closeSheet(); render(); toast(MEAL_NAME[m] + ' planificada: el resto del día se ha recolocado');
       }
-      else if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0)}); }
+      else if (x.dataset.x === 'ok'){ let t = toMin(el.querySelector('#at').value); if (t < 300) t += 1440; closeSheet(); logMeal(m, 'changed', {at:t, items:items.filter(i=>i.g>0).map(i => ({id:i.id, g:i.g}))}); }
     });
   });
 }
@@ -1259,7 +1297,7 @@ function sheetOther(m){
 }
 
 function sheetSwap(m, i){
-  const k = viewDay(), D = computeDay(k), it = D.meals[m].items[i], locked = !!D.meals[m].locked;
+  const k = viewDay(), D = computeDay(k), it = D.meals[m].items[i], locked = !!D.meals[m].editado;
   // en una comida con cantidades fijadas se cambia lo que hay ahora; si no, se parte del plan original
   const base = locked ? it : basePlan(k, D.sch, {noSwaps:true})[m][i];
   const orig = base.id, origG = base.g;
@@ -1286,7 +1324,7 @@ function sheetSwap(m, i){
     el.querySelector('#swq').addEventListener('input', () => { if (MDB) drawMdb(); });
     const day = getDay(k);
     const apply = to => {
-      if (locked){ const pe = planItems(m); if (pe[i]) pe[i] = {id:to, g:equiv(orig, origG, to)}; if (FOODS[to].mid) keepFood(to); }
+      if (locked){ const pe = planItems(m); if (pe[i]) pe[i] = {id:to, g:equiv(orig, origG, to), fijo:pe[i].fijo}; if (FOODS[to].mid) keepFood(to); }
       else {
         day.swaps = day.swaps || {}; day.swaps[m] = day.swaps[m] || {};
         if (to === orig) delete day.swaps[m][i]; else { day.swaps[m][i] = {id:to}; keepFood(to); }
@@ -1704,7 +1742,7 @@ function sheetCoach(m){
       const ap = e.target.closest('[data-apply]');
       if (ap){
         const o = coachDraft.last.r.opciones[+ap.dataset.apply], day = getDay(viewDay());
-        day.planEdit = day.planEdit || {}; day.planEdit[m] = o.items.map(it => ({id:it.id, g:it.g}));
+        day.planEdit = day.planEdit || {}; day.planEdit[m] = o.items.map(it => ({id:it.id, g:it.g, fijo:true}));
         o.items.forEach(it => { if (FOODS[it.id].mid) keepFood(it.id); });
         save(); closeSheet(); render(); toast(`${MEAL_NAME[m]}: «${o.titulo}» aplicada. El resto del día se ha recolocado.`); return;
       }
@@ -1754,7 +1792,7 @@ function sheetMove(m, i){
       // comidas se siguen ajustando solas (antes se quedaban fijadas)
       const srcLocked = !!D.meals[m].locked, dstLocked = !!D.meals[to].locked;
       if (srcLocked) planItems(m).splice(i, 1);
-      if (dstLocked) planItems(to).push({id:it.id, g:it.g, mf:m});
+      if (dstLocked) planItems(to).push({id:it.id, g:it.g, mf:m, fijo:true});
       if (!srcLocked || !dstLocked) (day.moves = day.moves || []).push({from:m, to, id:it.id, g:it.g, sacar:!srcLocked, poner:!dstLocked});
       // si la comida se queda vacía, cuenta como hecha junto con la otra (no como saltada)
       if (D.meals[m].items.filter(x => !x.fromBatido).length <= 1) day.meals[m] = {status:'moved', to, items:[]};
