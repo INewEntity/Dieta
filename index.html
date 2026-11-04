@@ -162,7 +162,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 44;
+const VERSION = 45;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -184,7 +184,7 @@ const FOODS = {
   pan:{n:'Pan integral',g:'carb',k:245,p:9.5,c:42,f:3.3,sec:'Panadería y despensa'},
   arroz:{n:'Arroz basmati (crudo)',g:'carb',k:355,p:8,c:78,f:0.6,sec:'Panadería y despensa'},
   pasta:{n:'Macarrones (crudos)',g:'carb',k:359,p:12,c:72,f:1.5,sec:'Panadería y despensa'},
-  avena:{n:'Copos de avena',g:'carb',k:370,p:13,c:59,f:7,sec:'Panadería y despensa'},
+  avena:{n:'Avena molida',g:'carb',k:384,p:12.2,c:59.9,f:7.1,sec:'Panadería y despensa'},
   patata:{n:'Patata',g:'carb',k:77,p:2,c:16,f:0.1,sec:'Fruta y verdura'},
   batata:{n:'Batata',g:'carb',k:86,p:1.6,c:18,f:0.1,sec:'Fruta y verdura'},
   garbanzos:{n:'Garbanzos cocidos',g:'carb',k:115,p:7,c:13,f:2,sec:'Conservas'},
@@ -199,13 +199,13 @@ const FOODS = {
   tomtrit:{n:'Tomate triturado',g:'verd',k:30,p:1.3,c:4.5,f:0.2,sec:'Conservas'},
   aove:{n:'AOVE',g:'grasa',k:899,p:0,c:0,f:99.9,sec:'Panadería y despensa'},
   aguacate:{n:'Aguacate',g:'grasa',k:160,p:2,c:2,f:15,sec:'Fruta y verdura'},
-  nueces:{n:'Nueces',g:'grasa',k:680,p:15,c:4,f:65,sec:'Panadería y despensa'},
+  nueces:{n:'Anacardos',g:'grasa',k:586,p:19,c:25,f:46,min:10,sec:'Panadería y despensa'}, // el id es de cuando eran nueces; min: nunca menos de 10 g
 };
 const FOODS_BASE = JSON.parse(JSON.stringify(FOODS)); // valores genéricos, para poder desvincular
 const GROUP_KEY = {prot:'p',carb:'c',grasa:'f',fruta:'c',verd:null,liq:null};
 const ALTS = {
   prot:['pollo','pavo','atun','merluza','ternera','salmon','sardinas','claras','huevo','quesob','yogurp','whey'],
-  carb:['arroz','pasta','patata','pan','avena','batata','garbanzos'],
+  carb:['arroz','pasta','batata','pan','avena','garbanzos'], // sin patata: siempre batata (04/11/2026)
   fruta:['platano','naranja','manzana'],
   verd:['zanahoria','tomtrit'], // solo las dos que come (03/11/2026)
   grasa:['aove','aguacate','nueces'],
@@ -214,8 +214,11 @@ const ALTS = {
 const GROUP_NAME = {prot:'Proteína',carb:'Hidratos',fruta:'Fruta',verd:'Verdura',grasa:'Grasa',liq:'Líquido'};
 
 /* ===================== Plan semanal (de 01_Dieta.md) ===================== */
-const DESAYUNO = [['huevo',220],['pan',100],['platano',120],['nueces',15]];
-const BATIDO = [['whey',30],['leche',250],['avena',40]];
+// FIJO = cantidad que no cambia nunca (la elige él): el desayuno, salvo los anacardos, y la proteína del batido.
+// 3 huevos medianos, 2 rebanadas de pan de molde (64 g) y una banana; los anacardos y lo demás del batido se ajustan.
+const FIJO = true;
+const DESAYUNO = [['huevo',165,FIJO],['pan',64,FIJO],['platano',120,FIJO],['nueces',20]];
+const BATIDO = [['whey',30,FIJO],['leche',250],['avena',40]];
 // desde este día el batido va todos los días (antes, solo los de entreno; el historial anterior no cambia)
 const BATIDO_DIARIO = '2026-10-28';
 // Verdura: solo zanahoria y tomate triturado; el tomate, solo donde hace de salsa (pasta y garbanzos).
@@ -226,11 +229,11 @@ const ALM = {
   pollo_pasta:[['pollo',200],['pasta',100],['tomtrit',150],['zanahoria',100],['aove',5],['naranja',150]],
 };
 const CEN = {
-  salmon:[['huevo',165],['salmon',150],['patata',550],['zanahoria',100],['aove',10]],
-  atun:[['huevo',165],['atun',150],['patata',450],['zanahoria',100],['aguacate',50]],
-  merluza:[['huevo',165],['merluza',125],['patata',550],['zanahoria',100],['aove',10]],
-  pollo:[['huevo',165],['pollo',150],['patata',500],['zanahoria',100],['aove',10]],
-  merluza_dom:[['huevo',110],['merluza',125],['patata',550],['zanahoria',100],['aove',10]],
+  salmon:[['huevo',165],['salmon',150],['batata',490],['zanahoria',100],['aove',10]],
+  atun:[['huevo',165],['atun',150],['batata',400],['zanahoria',100],['aguacate',50]],
+  merluza:[['huevo',165],['merluza',125],['batata',490],['zanahoria',100],['aove',10]],
+  pollo:[['huevo',165],['pollo',150],['batata',450],['zanahoria',100],['aove',10]],
+  merluza_dom:[['huevo',110],['merluza',125],['batata',490],['zanahoria',100],['aove',10]],
 };
 // 0 = domingo
 const WEEK = {
@@ -308,6 +311,16 @@ function applyLinks(){
 }
 function save(){ try{ localStorage.setItem(STORE, JSON.stringify(S)); }catch(e){} }
 load();
+// Productos que compra él: huevos medianos M (nunca los camperos) y avena molida. Se cambian una vez (04/11/2026);
+// después puede volver a cambiarlos en la despensa.
+const VINCULO_PREFERIDO = {huevo:'m31505', avena:'m16807'};
+function vinculosPreferidos(){
+  if ((S.migr || {}).vinculos45) return true;
+  if (Object.values(VINCULO_PREFERIDO).some(id => !FOODS[id] && !(MDB && useMDB(id)))) return false; // falta la base de Mercadona
+  S.link = S.link || {};
+  for (const [base, id] of Object.entries(VINCULO_PREFERIDO)){ S.link[base] = id; persistFood(id); }
+  (S.migr = S.migr || {}).vinculos45 = 1; applyLinks(); save(); return true;
+}
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
 
 /* ===================== Utilidades ===================== */
@@ -330,7 +343,7 @@ function mac(id, g){ const F = FOODS[id], r = g/100; return {k:F.k*r,p:F.p*r,c:F
 function sumItems(items){ return items.reduce((a,it)=>{ const m = mac(it.id,it.g); a.k+=m.k; a.p+=m.p; a.c+=m.c; a.f+=m.f; return a; }, {k:0,p:0,c:0,f:0}); }
 const addM = (a,b,s=1) => ({k:a.k+s*b.k,p:a.p+s*b.p,c:a.c+s*b.c,f:a.f+s*b.f});
 const ZERO = {k:0,p:0,c:0,f:0};
-function roundG(id, g){ const F = FOODS[id]; if (g <= 0) return 0; if (F.u) return Math.max(1, Math.round(g/F.u))*F.u; return g >= 100 ? Math.round(g/10)*10 : Math.max(5, Math.round(g/5)*5); }
+function roundG(id, g){ const F = FOODS[id]; if (g <= 0) return 0; if (F.min) g = Math.max(F.min, g); if (F.u) return Math.max(1, Math.round(g/F.u))*F.u; return g >= 100 ? Math.round(g/10)*10 : Math.max(5, Math.round(g/5)*5); }
 function amount(id, g){ const F = FOODS[id]; if (F.u){ const n = Math.round(g/F.u); return n+' '+F.un[n===1?0:1]; } return R(g)+(F.ml?' ml':' g'); }
 function equiv(from, g, to){
   const key = GROUP_KEY[FOODS[from].g];
@@ -365,6 +378,7 @@ function autoLink(){
   let changed = false;
   for (const [base, ids] of Object.entries(MDB.map)){
     if (base in S.link || !FOODS_BASE[base]) continue;
+    if (VINCULO_PREFERIDO[base] && useMDB(VINCULO_PREFERIDO[base])){ S.link[base] = VINCULO_PREFERIDO[base]; persistFood(S.link[base]); changed = true; continue; }
     // el más típico (orden de la base) que se parezca en kcal al del plan (±20 %); si ninguno, el más parecido.
     // Así el salmón fresco no acaba vinculado al salmón en lata.
     const B = FOODS_BASE[base], dif = id => Math.abs(FOODS[id].k - B.k) / Math.max(B.k, 1);
@@ -535,7 +549,8 @@ function schedule(k){
 }
 
 /* ===================== Plan del día y motor de ajuste ===================== */
-function mkItems(arr){ return arr.map(([id,g]) => ({id, g})); }
+// lo FIJO del plan base lleva fijo (el motor no lo toca) y base (no es un cambio tuyo: sin ✋)
+function mkItems(arr){ return arr.map(([id, g, fijo]) => fijo ? {id, g, fijo:true, base:true} : {id, g}); }
 // Objetivos del día: proteína la de Ajustes, grasa ~27 % de las kcal (entre 60 y 85 g) e hidratos el resto.
 // Así un día con menos kcal recorta grasa e hidratos en proporción, en vez de llenarse de la grasa de la carne.
 function dayMacros(kT){
@@ -546,7 +561,7 @@ function dayMacros(kT){
 // y los frutos secos, y las kcal con los hidratos. Fruta y verdura no se tocan. El batido entra dentro del total.
 function fitToTarget(plan, kT = kcalBase()){
   const all = Object.values(plan).flat(), T = dayMacros(kT);
-  const grp = g => all.filter(it => FOODS[it.id].g === g && !FOODS[it.id].u);
+  const grp = g => all.filter(it => FOODS[it.id].g === g && !FOODS[it.id].u && !it.fijo);
   const scaleTo = (g, key, want, lo, hi) => {
     const its = grp(g), own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
     if (!own) return;
@@ -554,7 +569,7 @@ function fitToTarget(plan, kT = kcalBase()){
     its.forEach(it => it.g = roundG(it.id, it.g * s));
   };
   scaleTo('prot', 'p', T.p, 0.6, 1.5);
-  scaleTo('grasa', 'f', T.f, 0, 2);
+  scaleTo('grasa', 'f', T.f, 0.2, 2);
   scaleTo('carb', 'k', kT, 0.35, 1.8);
   balanceMeals(plan);
   // Ajuste fino: el redondeo (huevos enteros, gramos de 5 en 5…) deja el día unos gramos fuera del objetivo.
@@ -564,7 +579,7 @@ function fitToTarget(plan, kT = kcalBase()){
   for (let pass = 0; pass < 2; pass++){
     const P = magro(), gapP = T.p - sumItems(all).p;
     if (P && Math.abs(gapP) >= 1) P.g = Math.max(40, Math.round((P.g + gapP / FOODS[P.id].p * 100) / 5) * 5);
-    if (Math.abs(T.f - sumItems(all).f) >= 3) scaleTo('grasa', 'f', T.f, 0, 2);
+    if (Math.abs(T.f - sumItems(all).f) >= 3) scaleTo('grasa', 'f', T.f, 0.2, 2);
     // las kcal se corrigen con todos los hidratos a la vez, para no deshacer el reparto entre comidas
     const carbs = grp('carb'), gapK = kT - sumItems(all).k;
     const kC = carbs.reduce((a, it) => a + mac(it.id, it.g).k, 0);
@@ -585,7 +600,7 @@ function balanceMeals(plan){
     // lo que aporta el grupo en cada comida, lo que debería aportar y un ajuste para que el total del día no cambie
     const tot = sumItems(Object.values(plan).flat())[key];
     const info = ms.map(m => {
-      const its = plan[m].filter(it => FOODS[it.id].g === grp && !FOODS[it.id].u); // los huevos van por unidades: no se tocan
+      const its = plan[m].filter(it => FOODS[it.id].g === grp && !FOODS[it.id].u && !it.fijo); // los huevos van por unidades y lo fijo no se toca
       const own = its.reduce((a, it) => a + mac(it.id, it.g)[key], 0);
       const otro = sumItems(plan[m])[key] - own;
       return {its, own, want: own ? Math.max(own * lo, Math.min(own * hi, tot * sh[m] - otro)) : 0};
@@ -606,14 +621,15 @@ function basePlan(k, sch, opts = {}){
     plan[m] = plan[m].map((it, i) => {
       // el cambio va por posición: si el menú base cambió y en ese sitio hay otro tipo de alimento, no se aplica
       const to = sw[i] && sw[i].id;
-      if (to && to !== it.id && FOODS[to] && FOODS[to].g === FOODS[it.id].g) return {id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'};
+      const fijo = it.fijo ? {fijo:true, base:it.base} : {};
+      if (to && to !== it.id && FOODS[to] && FOODS[to].g === FOODS[it.id].g) return Object.assign({id:to, g:equiv(it.id, it.g, to), from:it.id, why:'cambio'}, fijo);
       if (noHay(it.id)){
         // primero algo del mismo grupo que tengas en casa (despensa), luego los alimentos base
         const g = FOODS[it.id].g, key = GROUP_KEY[g] || 'k';
         const enCasa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === g && !noHay(id) && FOODS[id][key] > 0)
           .sort((a, b) => S.despensa[b] - S.despensa[a]);
         const alt = enCasa[0] || (ALTS[g] || []).find(a => a !== it.id && !noHay(a) && (FOODS[a].sec || a === 'agua'));
-        if (alt) return {id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'};
+        if (alt) return Object.assign({id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'}, fijo);
         return Object.assign({}, it, {missing:true});
       }
       return Object.assign({}, it);
@@ -718,7 +734,7 @@ function computeDay(k){
           its.forEach(x => { const g = roundG(x.id, x.g * f); if (g !== x.g){ x.orig = x.orig ?? x.g; x.g = g; } });
         };
         ajusta('prot', 'p', 2, 0.5, 1.6);
-        ajusta('grasa', 'f', 2, 0, 2.5);
+        ajusta('grasa', 'f', 2, 0.2, 2.5);
         ajusta('carb', 'k', 15, 0.4, 1.6);
         meals[m].items = items;
         bal = addM(bal, addM(sumItems(items), planned, -1));
@@ -797,7 +813,7 @@ function computeDay(k){
     let got = ZERO; const hecho = [];
     const paso = (grp, frac, nombre) => { if (cut <= 30) return; const g = scaleGroup(ms, grp, -cut, frac); if (g.k < -5){ got = addM(got, g); cut += g.k; if (!hecho.includes(nombre)) hecho.push(nombre); } };
     if (cut > 30){ const g = carbDown(ms, cut); if (g > 5){ got = addM(got, {k:-g, p:0, c:-g / 4, f:0}); cut -= g; hecho.push('hidratos'); } }
-    paso('grasa', 1, 'grasa'); paso('fruta', 0.5, 'fruta'); paso('liq', 1, 'la leche del batido'); // la fruta, como mucho a la mitad
+    paso('grasa', 0.8, 'grasa'); paso('fruta', 0.5, 'fruta'); paso('liq', 0.6, 'la leche del batido'); // la fruta, como mucho a la mitad; la leche, al 40 %
     let prot = false;
     if (conProteina && cut > 30){
       const pendP = ms.reduce((a, M) => a + sumItems(M.items).p, 0) + locked.reduce((a, m) => a + sumItems(meals[m].items).p, 0);
@@ -851,7 +867,7 @@ function computeDay(k){
       };
       const k0 = sumRest('k');
       fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25);
-      fit('grasa', 'f', OBJ.f - consumed.f - sumRest('f'), 3, 0, 2);
+      fit('grasa', 'f', OBJ.f - consumed.f - sumRest('f'), 3, 0.2, 2);
       const gapK = TK - consumed.k - copas.k - sumRest('k');
       if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, ms.filter(M => !(M.key === 'cena' && M.t >= late && postEntreno !== 'cena')));
       else if (gapK < -25) carbDown(ms, -gapK);
@@ -1067,7 +1083,7 @@ function mealCard(M, now){
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
       const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>'
         : it.mf ? ` <span class="muted" style="font-size:12px">(de ${MEAL_NAME[it.mf].toLowerCase()})</span>` : '';
-      const name = esc(dispName(it.id)) + sub + (it.fijo && !M.locked ? ' <span class="muted" style="font-size:12px" title="Cantidad fijada por ti">✋</span>' : '');
+      const name = esc(dispName(it.id)) + sub + (it.fijo && !it.base && !M.locked ? ' <span class="muted" style="font-size:12px" title="Cantidad fijada por ti">✋</span>' : '');
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
       const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
       return st === 'pending' && !it.fromBatido
@@ -1090,7 +1106,7 @@ function planItems(m){
   const day = getDay(viewDay());
   const shown = computeDay(viewDay()).meals[m].items.filter(x => !x.fromBatido);
   day.planEdit = day.planEdit || {};
-  day.planEdit[m] = shown.map(x => Object.assign({id:x.id, g:x.g, fijo:!!x.fijo}, x.added ? {added:true} : {}, x.mf ? {mf:x.mf} : {}));
+  day.planEdit[m] = shown.map(x => Object.assign({id:x.id, g:x.g, fijo:!!x.fijo}, x.base ? {base:true} : {}, x.added ? {added:true} : {}, x.mf ? {mf:x.mf} : {}));
   return day.planEdit[m];
 }
 function qtyStep(id, g){ const F = FOODS[id]; return F.u ? F.u : g < 60 ? 5 : g < 200 ? 10 : 25; }
@@ -1098,7 +1114,7 @@ function changeQty(m, i, dir){
   const items = planItems(m), it = items[i]; if (!it) return;
   const step = qtyStep(it.id, it.g);
   it.g = Math.max(0, FOODS[it.id].u ? Math.round(it.g / step) * step + dir * step : Math.round((it.g + dir * step) / 5) * 5);
-  it.fijo = true;
+  it.fijo = true; delete it.base;
   if (it.g <= 0){ items.splice(i, 1); toast(FOODS[it.id].n + ' quitado de esta comida'); }
   save(); render();
 }
@@ -1115,7 +1131,7 @@ function sheetQty(m, i){
       if (!(v >= 0)) return toast('Escribe un número');
       const items = planItems(m);
       if (v === 0){ items.splice(i, 1); toast(F.n + ' quitado de esta comida'); }
-      else { items[i].g = F.u ? Math.round(v) * F.u : Math.round(v); items[i].fijo = true; }
+      else { items[i].g = F.u ? Math.round(v) * F.u : Math.round(v); items[i].fijo = true; delete items[i].base; }
       save(); closeSheet(); render();
     };
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
@@ -2336,6 +2352,7 @@ tabFromHash();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
 // Si la dieta base aún no está vinculada a Mercadona, la base se carga en segundo plano y se vincula sola
 if (Object.keys(S.link || {}).length < Object.keys(FOODS_BASE).length - 3) setTimeout(() => loadMDB().then(() => render()).catch(() => {}), 1200);
+if (!vinculosPreferidos()) setTimeout(() => loadMDB().then(() => { if (vinculosPreferidos()) render(); }).catch(() => {}), 600);
 render();
 </script>
 </body>
