@@ -164,7 +164,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 46;
+const VERSION = 47;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -488,7 +488,7 @@ function schedule(k){
   const day = getDay(k), tr = trainOf(k), wake0 = wakeOf(k);
   // si entrenas antes de tu hora de despertar, ese día te levantas antes: media hora antes de entrenar
   const wake = tr.on && tr.start < wake0 ? Math.max(0, tr.start - 30) : wake0;
-  const want = desiredTimes(wake, tr), noche = !!want.noche, bed = bedFor(tr);
+  const want = desiredTimes(wake, tr), noche = !!want.noche, bed = bedFor(tr), juntas = day.juntas || {};
   if (wake < wake0) want.cena = Math.max(want.cena, 20*60 + 30); // madrugar para entrenar no adelanta la hora de dormir
   // de noche el batido va después de la cena (es lo de después de entrenar)
   const order = ['desayuno','almuerzo'].concat(noche ? ['cena','merienda'] : (tr.on || k >= BATIDO_DIARIO ? ['merienda'] : []).concat(['cena']));
@@ -513,12 +513,24 @@ function schedule(k){
       out[m] = {t, status:log.status};
       if (log.status !== 'skipped' && log.status !== 'moved'){ prev = t; pm = m; adv = Math.min(0, t - want[m]); }
     } else {
+      // comida que se junta con la de al lado (day.juntas): no tiene hora propia, va con aquella. El batido de
+      // después de entrenar no se junta.
+      const b = juntas[m], lb = b && day.meals[b];
+      if (b && order.includes(b) && Math.abs(order.indexOf(b) - order.indexOf(m)) === 1 && (!lb || lb.status === 'pending')
+          && !(m === 'merienda' && (noche || tr.on && want.merienda >= tE))){
+        out[m] = {t:null, status:'pending', merged:true, junta:b}; continue;
+      }
       let t = prev != null ? Math.max(wantAdv(m), prev + gapTras(pm)) : want[m];
+      // desayuno + almuerzo: hora y media después de levantarte (o dentro de media hora, si ya es tarde), sin pasar
+      // de la hora del almuerzo
+      if (m === 'almuerzo' && out.desayuno && out.desayuno.junta === 'almuerzo')
+        t = Math.min(wantAdv('almuerzo'), Math.max(want.desayuno + 60, k === dayKey() ? nowMin() + 30 : 0));
       if (enEntreno(t, m)) t = tE + 15;
       out[m] = {t, status:'pending'}; prev = t; pm = m;
     }
   }
-  const limit = toMin(S.settings.dinnerLimit), C = out.cena, B = out.merienda;
+  for (const m of order) if (out[m].junta) out[m].t = out[out[m].junta].t;
+  const limit = toMin(S.settings.dinnerLimit), C = out.cena, B = out.merienda && !out.merienda.junta ? out.merienda : null;
   if (noche){
     // si la cena ya no cabe antes de entrenar (p. ej. por un almuerzo muy tarde), queda después y el batido va con ella
     if (B && B.status === 'pending' && C.status === 'pending' && C.t >= tE) B.merged = true;
@@ -640,7 +652,34 @@ function basePlan(k, sch, opts = {}){
   // Con intercambios o cosas que se acaban, el plan se desvía del objetivo: se vuelve a cuadrar aquí, para que
   // el plan del día ya sume el objetivo y el motor no muestre «ajustes» cuando aún no se ha comido nada.
   if (Object.values(plan).some(items => items.some(it => it.from))) fitToTarget(plan, kT);
+  // comidas juntadas: la de destino lleva lo de las dos y la otra se queda vacía
+  for (const [a, b] of Object.entries(day.juntas || {})) if (plan[a] && plan[b] && juntaActiva(day, sch, a)){ plan[b] = juntarPlatos(plan[a], plan[b], a); plan[a] = []; }
   return plan;
+}
+// ¿la comida a va hoy junto con la suya? (pendientes las dos, o ya registrada con ella)
+function juntaActiva(day, sch, a){
+  const t = sch.times[a], b = (day.juntas || {})[a];
+  return !!t && !!b && (t.junta === b || (t.status === 'moved' && (day.meals[a] || {}).to === b));
+}
+// Juntar dos comidas (p. ej. si te levantas tarde): una sola con lo que aportaban las dos, como mucho JUNTA_MAX kcal
+// (lo que sobre lo absorbe el resto del día). Se arma con el plato de la de destino, más grande, más la fruta de la
+// otra: no se suman los dos platos tal cual ni pasa lo fijo de la otra (el desayuno de siempre no se come a las tres).
+const JUNTA_MAX = 1300;
+function juntarPlatos(A, B, a){
+  const tot = addM(sumItems(A), sumItems(B)), f = Math.min(1, JUNTA_MAX / Math.max(tot.k, 1));
+  const T = {k:tot.k * f, p:tot.p * f, c:tot.c * f, f:tot.f * f};
+  const items = B.map(x => Object.assign({}, x, x.fijo ? {} : {orig:x.g}))
+    .concat(A.filter(x => FOODS[x.id].g === 'fruta').map(x => ({id:x.id, g:x.g, dj:a})));
+  const escala = (grp, key, lo, hi) => {
+    const its = items.filter(x => FOODS[x.id].g === grp && !x.fijo && !x.dj && !FOODS[x.id].u);
+    const own = its.reduce((s2, x) => s2 + mac(x.id, x.g)[key], 0), gap = T[key] - sumItems(items)[key];
+    if (!own || Math.abs(gap) < 1) return;
+    const sc = Math.max(lo, Math.min(hi, 1 + gap / own));
+    its.forEach(x => x.g = roundG(x.id, x.g * sc));
+  };
+  // proteína con la carne o el pescado, grasa con el aceite y compañía, kcal con los hidratos (que también traen proteína)
+  escala('prot', 'p', 0.5, 2.5); escala('grasa', 'f', 0.2, 3); escala('carb', 'k', 0.4, 2.5); escala('prot', 'p', 0.5, 2.5);
+  return items;
 }
 
 /* ===================== Compensación semanal ===================== */
@@ -700,7 +739,7 @@ function computeDay(k){
     const t = sch.times[m], planned = sumItems(plan[m]);
     target = addM(target, planned);
     const log = day.meals[m];
-    meals[m] = {key:m, t:t.t, status:t.status, merged:!!t.merged, items:plan[m].map(x=>Object.assign({}, x)), base:planned, log, notes:[], protAdded:0};
+    meals[m] = {key:m, t:t.t, status:t.status, merged:!!t.merged, junta:t.junta || null, items:plan[m].map(x=>Object.assign({}, x)), base:planned, log, notes:[], protAdded:0};
     if (t.status !== 'pending'){
       const c = consumedOf(log); consumed = addM(consumed, c); bal = addM(bal, addM(c, planned, -1));
       meals[m].items = (log.items || []).map(x=>Object.assign({}, x));
@@ -743,6 +782,10 @@ function computeDay(k){
       }
     }
   }
+  for (const [a, b] of Object.entries(day.juntas || {})) if (meals[a] && meals[b] && juntaActiva(day, sch, a)){
+    meals[b].juntaDe = a;
+    meals[b].notes.push(`🔗 Hoy ${a === 'desayuno' ? 'el desayuno va con el almuerzo' : 'el batido va con el almuerzo'}: este plato lleva lo de las dos comidas (hasta ${String(JUNTA_MAX).replace(/\B(?=(\d{3})+$)/g, '.')} kcal; si sobra, va al resto del día).`);
+  }
   // alimentos movidos de una comida a otra (pulsación larga): salen de una y entran en la otra antes de ajustar el
   // día, así las dos comidas se siguen ajustando solas (si alguna tiene cantidades fijadas, el cambio va en ellas)
   for (const mv of day.moves || []){
@@ -759,7 +802,7 @@ function computeDay(k){
     A.movido = B.movido = true;
   }
   // el batido que no cabe va con la cena
-  if (meals.merienda && meals.merienda.merged && meals.cena.status === 'pending'){
+  if (meals.merienda && meals.merienda.merged && !meals.merienda.junta && meals.cena.status === 'pending'){
     meals.cena.items = meals.cena.items.concat(meals.merienda.items.map(x => Object.assign({}, x, {fromBatido:true})));
     meals.cena.notes.push('Hoy no cabe el batido aparte: <b>tómalo con la cena</b> o justo después.');
   }
@@ -871,7 +914,7 @@ function computeDay(k){
       fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25);
       fit('grasa', 'f', OBJ.f - consumed.f - sumRest('f'), 3, 0.2, 2);
       const gapK = TK - consumed.k - copas.k - sumRest('k');
-      if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, ms.filter(M => !(M.key === 'cena' && M.t >= late && postEntreno !== 'cena')));
+      if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, ms.filter(M => !(M.key === 'cena' && M.t >= late && postEntreno !== 'cena') && !M.juntaDe));
       else if (gapK < -25) carbDown(ms, -gapK);
       fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25); // el pan, la pasta o la avena también traen proteína
       const dk = sumRest('k') - k0;
@@ -989,7 +1032,7 @@ function render(){
 }
 function applyTheme(){ const t = S.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 
-const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !x.fiesta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length && !(x.moves || []).length);
+const dayIsEmpty = x => !x || (!Object.keys(x.meals || {}).length && !x.train && !x.wake && !x.nocuenta && !x.fiesta && !Object.keys(x.swaps || {}).length && !Object.keys(x.planEdit || {}).length && !(x.moves || []).length && !Object.keys(x.juntas || {}).length);
 function renderHoy(){
   const k = viewDay(), isToday = k === dayKey(), existed = !!S.days[k];
   const D = computeDay(k), day = getDay(k), now = nowFor(k);
@@ -1036,7 +1079,8 @@ function renderHoy(){
   const pend = D.sch.order.filter(m => D.meals[m].status === 'pending' && !D.meals[m].merged);
   const overdue = pend.filter(m => now > D.meals[m].t + 45);
   if (!isToday){ if (pend.length) tips.push({cls:'', html:`Quedaron <b>${pend.length} comida${pend.length === 1 ? '' : 's'} sin registrar</b>. Si las hiciste, márcalas para que tu historial y el % de Progreso sean reales.`}); }
-  else if (overdue.length) tips.push({cls:'amber', html:`<b>${MEAL_NAME[overdue[0]]}</b> sigue pendiente desde las ${fmt(D.meals[overdue[0]].t)}. Márcala o desliza para recolocar el día.`});
+  else if (overdue.length) tips.push({cls:'amber', html:`<b>${MEAL_NAME[overdue[0]]}</b> sigue pendiente desde las ${fmt(D.meals[overdue[0]].t)}. Márcala o desliza para recolocar el día.`
+    + (overdue[0] === 'desayuno' && juntables(D).some(([x]) => x === 'desayuno') ? ` Si ya se te ha hecho tarde, puedes <button class="stp-reset" data-act="juntar" data-m="desayuno">juntarlo con el almuerzo</button>.` : '')});
   if (isToday && tr.on && !tr.done && now > tr.start + tr.dur + 30) tips.push({cls:'amber', html:`¿Has entrenado? Toca el entreno para confirmarlo o cambiarlo.`});
   if (isToday && now >= toMin('21:30') && pLeft > 25 && pend.length <= 1) tips.push({cls:'coral', html:`Te quedan <b>${R(pLeft)} g de proteína</b>. Si no te entra la cena entera, prioriza el pescado/carne y los huevos.`});
   if (tips.length) h += `<ul class="tips">${tips.map(t=>`<li class="${t.cls}">${t.html}</li>`).join('')}</ul>`;
@@ -1086,7 +1130,8 @@ function mealCard(M, now){
       const cls = it.added ? 'plus' : it.delta > 0 ? 'plus' : it.delta < 0 ? 'minus' : it.missing ? 'miss' : '';
       const amt = it.added ? '+' + amount(it.id, it.g) : it.delta ? `<s>${amount(it.id, it.orig)}</s> ${amount(it.id, it.g)}` : amount(it.id, it.g);
       const sub = it.from ? ` <span class="muted" style="font-size:12px">(${it.why==='falta'?'no hay ':'en vez de '}${esc(FOODS[it.from].n.toLowerCase())})</span>` : it.missing ? ' <span style="font-size:12px">(no hay)</span>'
-        : it.mf ? ` <span class="muted" style="font-size:12px">(de ${MEAL_NAME[it.mf].toLowerCase()})</span>` : '';
+        : it.mf ? ` <span class="muted" style="font-size:12px">(de ${MEAL_NAME[it.mf].toLowerCase()})</span>`
+        : it.dj ? ` <span class="muted" style="font-size:12px">(del ${MEAL_NAME[it.dj].toLowerCase()})</span>` : '';
       const name = esc(dispName(it.id)) + sub + (it.fijo && !it.base && !M.locked ? ' <span class="muted" style="font-size:12px" title="Cantidad fijada por ti">✋</span>' : '');
       // − / + para cambiar la cantidad sin marcar la comida: el resto del día se recoloca al momento
       const stp = d => `<button class="stp" data-act="qty" data-m="${M.key}" data-i="${i}" data-d="${d}" aria-label="${d < 0 ? 'Menos' : 'Más'} ${esc(dispName(it.id))}">${d < 0 ? '−' : '+'}</button>`;
@@ -1094,12 +1139,12 @@ function mealCard(M, now){
         ? `<li class="${cls}${it.added || it.mf ? '' : ' mv'}" ${it.added || it.mf ? '' : `data-move="${M.key}" data-i="${i}"`}>${it.added && !M.locked ? `<span>${name}</span>` : `<button data-act="swap" data-m="${M.key}" data-i="${i}">${name}</button>`}<span class="qty">${stp(-1)}<button class="amt num qamt" data-act="qtyset" data-m="${M.key}" data-i="${i}" aria-label="Escribir la cantidad de ${esc(dispName(it.id))}">${amt}</button>${stp(1)}<button class="del" data-act="quitar" data-m="${M.key}" data-i="${i}" aria-label="Quitar ${esc(dispName(it.id))}">✕</button></span></li>`
         : `<li class="${cls}"><span>${name}</span><span class="amt num">${amt}</span></li>`;
     }).join('')}</ul>`;
-  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.editado ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}${M.movido ? ` <button class="stp-reset" data-act="moveundo" data-m="${M.key}">Deshacer el movimiento</button>` : ''}</div>` : '';
+  const notes = M.notes.length && st === 'pending' ? `<div class="evnote">${M.notes.join('<br>')}${M.editado ? ` <button class="stp-reset" data-act="planreset" data-m="${M.key}">Volver al plan</button>` : ''}${M.movido ? ` <button class="stp-reset" data-act="moveundo" data-m="${M.key}">Deshacer el movimiento</button>` : ''}${M.juntaDe ? ` <button class="stp-reset" data-act="separar" data-m="${M.key}">Separar</button>` : ''}</div>` : '';
   const actions = st === 'pending'
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="foto" data-m="${M.key}" aria-label="Foto de lo que he comido">📷</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
   return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
-    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${MEAL_NAME[M.key]}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
+    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${M.juntaDe === 'desayuno' ? 'Desayuno + almuerzo' : M.juntaDe ? MEAL_NAME[M.key] + ' + ' + MEAL_NAME[M.juntaDe].toLowerCase() : MEAL_NAME[M.key]}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
 }
 
 /* ===================== Acciones de comidas ===================== */
@@ -1165,12 +1210,16 @@ function logMeal(m, status, extra = {}){
   day.meals[m].items.forEach(it => { if (FOODS[it.id] && FOODS[it.id].mid) keepFood(it.id); });
   const prevEdit = day.planEdit && day.planEdit[m]; if (prevEdit) delete day.planEdit[m]; // ya está registrada
   // marcar el batido como tomado si iba con la cena
-  if (m === 'cena' && D.meals.merienda && D.meals.merienda.merged && status !== 'skipped'){
+  if (m === 'cena' && D.meals.merienda && D.meals.merienda.merged && !D.meals.merienda.junta && status !== 'skipped'){
     day.meals.merienda = {status:'done', at: day.meals[m].at, items: []};
   }
+  // lo que iba junto con esta comida cuenta como hecho con ella (o saltado, si te la saltas)
+  const prevJ = Object.keys(day.juntas || {}).filter(a => day.juntas[a] === m && D.meals[a] && D.meals[a].junta === m).map(a => [a, day.meals[a]]);
+  prevJ.forEach(([a]) => { day.meals[a] = status === 'skipped' ? {status:'skipped', items:[]} : {status:'moved', to:m, at:day.meals[m].at, items:[]}; });
   save(); render();
   toast(status === 'skipped' ? MEAL_NAME[m] + ' saltada: recoloco el día' : MEAL_NAME[m] + ' registrada', () => {
     if (prev) day.meals[m] = prev; else delete day.meals[m];
+    prevJ.forEach(([a, p]) => { if (p) day.meals[a] = p; else delete day.meals[a]; });
     if (prevEdit){ day.planEdit = day.planEdit || {}; day.planEdit[m] = prevEdit; }
     save(); render();
   });
@@ -1189,10 +1238,36 @@ function sheet(html, onMount){
 function closeSheet(){ runCleanup(); document.getElementById('sheet-root').innerHTML = ''; }
 const timeInput = (id, val) => `<input type="time" id="${id}" value="${fmt(val)}">`;
 
+// Parejas que se pueden juntar ahora: [la que se junta, la de destino]. Las dos pendientes y seguidas; el batido,
+// solo si no es el de después de entrenar.
+function juntables(D){
+  const o = D.sch.order, tr = D.sch.tr;
+  return [['desayuno', 'almuerzo'], ['merienda', 'almuerzo']].filter(([a, b]) => { const A = D.meals[a], B = D.meals[b];
+    return A && B && A.status === 'pending' && B.status === 'pending' && !A.merged && !B.merged && !B.juntaDe
+      && Math.abs(o.indexOf(a) - o.indexOf(b)) === 1 && !(a === 'merienda' && (D.sch.noche || tr.on && A.t >= tr.start + tr.dur)); });
+}
+function juntarComidas(a, b){
+  const day = getDay(viewDay()), snap = structuredClone({j:day.juntas || {}, pe:day.planEdit || {}, mv:day.moves || []});
+  (day.juntas = day.juntas || {})[a] = b;
+  if (day.planEdit){ delete day.planEdit[a]; delete day.planEdit[b]; } // se arma de nuevo con lo de las dos
+  if (day.moves) day.moves = day.moves.filter(mv => mv.from !== a && mv.to !== a);
+  save(); render();
+  toast(`${MEAL_NAME[a]} y ${MEAL_NAME[b].toLowerCase()}, juntos`, () => { day.juntas = snap.j; day.planEdit = snap.pe; day.moves = snap.mv; save(); render(); });
+}
+function separarComidas(b){
+  const day = getDay(viewDay()), a = Object.keys(day.juntas || {}).find(x => day.juntas[x] === b); if (!a) return;
+  const snap = structuredClone({j:day.juntas, pe:day.planEdit || {}});
+  delete day.juntas[a]; if (day.planEdit) delete day.planEdit[b];
+  save(); render();
+  toast(`${MEAL_NAME[a]} y ${MEAL_NAME[b].toLowerCase()}, separados`, () => { day.juntas = snap.j; day.planEdit = snap.pe; save(); render(); });
+}
 function sheetMore(m){
   const k = viewDay(), D = computeDay(k), M = D.meals[m];
+  const jt = juntables(D).filter(pr => pr.includes(m));
   sheet(`<h2>${MEAL_NAME[m]}</h2><div class="sub">Prevista a las ${fmt(M.t)}</div>
   <div class="stack">
+    ${jt.map(([a, b]) => `<button class="opt" data-x="juntar" data-a="${a}" data-b="${b}"><span>🔗 Juntar con el ${MEAL_NAME[m === a ? b : a].toLowerCase()}</span><span class="d">una sola comida con lo de las dos</span></button>`).join('')}
+    ${M.juntaDe ? `<button class="opt" data-x="separar"><span>✂️ Separar del ${MEAL_NAME[M.juntaDe].toLowerCase()}</span><span class="d">vuelven a ser dos</span></button>` : ''}
     <button class="opt" data-x="other"><span>🍽️ Comí otra cosa</span><span class="d">IA (texto o foto) o estimación</span></button>
     <button class="opt" data-x="plan"><span>➕ Añadir un alimento</span><span class="d">buscar o escanear</span></button>
     <button class="opt" data-x="at"><span>🕐 Hecha a otra hora</span><span class="d">elige la hora</span></button>
@@ -1208,6 +1283,8 @@ function sheetMore(m){
       if (a === 'plan') sheetEdit(m, null, 'plan');
       if (a === 'other') sheetOther(m);
       if (a === 'skip'){ closeSheet(); logMeal(m, 'skipped'); }
+      if (a === 'juntar'){ closeSheet(); juntarComidas(x.dataset.a, x.dataset.b); }
+      if (a === 'separar'){ closeSheet(); separarComidas(m); }
     });
   });
 }
@@ -1838,7 +1915,7 @@ function sheetMove(m, i){
 // «Deshacer» en una comida que se movió entera: vuelve a su plan y se quita lo que se había pasado a la otra
 function undoMove(m){
   const day = getDay(viewDay()), to = day.meals[m].to;
-  delete day.meals[m]; if (day.planEdit) delete day.planEdit[m];
+  delete day.meals[m]; if (day.planEdit) delete day.planEdit[m]; if (day.juntas) delete day.juntas[m];
   if (day.planEdit && day.planEdit[to]){ day.planEdit[to] = day.planEdit[to].filter(x => x.mf !== m); }
   if (day.moves) day.moves = day.moves.filter(x => x.from !== m);
   save(); render(); toast(MEAL_NAME[m] + ' vuelve a su plan');
@@ -2303,10 +2380,15 @@ app.addEventListener('click', async e => {
   if (a === 'done') logMeal(m, 'done');
   else if (a === 'more') sheetMore(m);
   else if (a === 'undo' && getDay(viewDay()).meals[m]?.status === 'moved') undoMove(m);
-  else if (a === 'undo'){ const day = getDay(viewDay()); const prev = day.meals[m]; delete day.meals[m]; if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
+  else if (a === 'undo'){ const day = getDay(viewDay()); const prev = day.meals[m]; delete day.meals[m];
+    // lo que iba junto con ella vuelve a ir junto (pendiente)
+    for (const [x, dest] of Object.entries(day.juntas || {})) if (dest === m && day.meals[x]?.status === 'moved' && day.meals[x].to === m) delete day.meals[x];
+    if (m === 'cena' && day.meals.merienda && !day.meals.merienda.items?.length) delete day.meals.merienda; save(); render(); toast(MEAL_NAME[m] + ' vuelve a pendiente', () => { day.meals[m] = prev; save(); render(); }); }
   else if (a === 'swap') sheetSwap(m, +b.dataset.i);
   else if (a === 'qty') changeQty(m, +b.dataset.i, +b.dataset.d);
   else if (a === 'quitar') quitarItem(m, +b.dataset.i);
+  else if (a === 'juntar') juntarComidas(m, 'almuerzo');
+  else if (a === 'separar') separarComidas(m);
   else if (a === 'qtyset') sheetQty(m, +b.dataset.i);
   else if (a === 'coach') sheetCoach(m);
   else if (a === 'foto') fotoMeal(m);
