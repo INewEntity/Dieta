@@ -166,7 +166,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 50;
+const VERSION = 51;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -444,11 +444,11 @@ function candidatesFor(text, limit = 20){
   return out.slice(0, limit);
 }
 
-function toast(msg, undo){
+function toast(msg, undo, boton = 'Deshacer', ms = 4000){
   document.querySelectorAll('.toast').forEach(t=>t.remove());
-  const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = esc(msg) + (undo ? ' <button>Deshacer</button>' : '');
+  const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = esc(msg) + (undo ? ` <button>${esc(boton)}</button>` : '');
   if (undo) t.querySelector('button').onclick = () => { undo(); t.remove(); };
-  document.body.appendChild(t); setTimeout(()=>t.remove(), 4000);
+  document.body.appendChild(t); setTimeout(()=>t.remove(), ms);
 }
 
 /* ===================== Entreno y horario ===================== */
@@ -2583,7 +2583,24 @@ app.addEventListener('click', async e => {
   else if (a === 'export'){ const blob = new Blob([JSON.stringify(S, null, 1)], {type:'application/json'}); const url = URL.createObjectURL(blob); const l = document.createElement('a'); l.href = url; l.download = 'dieta-' + dayKey() + '.json'; l.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000); }
 });
 app.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role=button]')){ e.preventDefault(); e.target.click(); } });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+// ¿Hay una versión publicada más nueva que la que tienes abierta? Se mira al abrir la app y al volver a ella (sw.js
+// es pequeño y lleva el número). Si la hay, se recarga sola; si tienes una hoja abierta, te lo ofrece. Antes la app
+// abierta en segundo plano seguía con la versión vieja en memoria aunque ya hubiera una nueva.
+let versionVista = 0;
+async function buscarVersion(forzar = false){
+  if ((DEV && !forzar) || Date.now() - versionVista < 60e3) return;
+  versionVista = Date.now();
+  try{
+    const t = await (await fetch('sw.js', {cache:'no-store'})).text(), v = +((t.match(/dieta-v(\d+)/) || [])[1] || 0);
+    if (v <= VERSION) return;
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.update().catch(() => {});
+    if (document.querySelector('.sheet')) toast(`Hay una versión nueva de la app (${v})`, () => location.reload(), 'Actualizar', 15000);
+    else location.reload();
+  }catch(_){}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden){ render(); buscarVersion(); } });
+setTimeout(buscarVersion, 3000);
 setInterval(() => { if (!document.hidden && TAB === 'hoy' && !document.querySelector('.sheet')) render(); }, 60000);
 
 // los avisos abren la app en la pestaña que toca (#hoy, #progreso, #compra…)

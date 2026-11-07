@@ -1,5 +1,5 @@
 // Service worker: funciona sin conexión y muestra los avisos push.
-const CACHE = 'dieta-v50';
+const CACHE = 'dieta-v51';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './badge-96.png'];
 const PUSH_API = 'https://dieta-avisos.dieta-avisos.workers.dev';
 
@@ -9,11 +9,15 @@ self.addEventListener('install', e => {
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('dieta-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
-// Red primero para la página (así llegan las actualizaciones); caché si no hay conexión.
+// Red primero para la página (así llegan las actualizaciones); caché si no hay conexión. Se pregunta siempre al
+// servidor (no-cache): GitHub Pages deja guardada cada versión 10 minutos y la app abría la anterior.
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
+  const red = e.request.mode === 'navigate'
+    ? fetch(e.request.url, {cache:'no-cache', credentials:'same-origin'}).then(r => r.redirected ? fetch(e.request) : r)
+    : fetch(e.request, {cache:'no-cache'});
   e.respondWith(
-    fetch(e.request).then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
+    red.then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
       .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
   );
 });
