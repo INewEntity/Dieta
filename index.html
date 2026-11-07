@@ -164,7 +164,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 47;
+const VERSION = 48;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -1309,10 +1309,11 @@ function sheetEdit(m, init = null, mode = 'log'){
         <button class="btn sm ghost" data-del="${i}" aria-label="Quitar">✕</button></div>`; }).join('');
     sum(el);
   };
-  sheet(`<h2>${plan ? MEAL_NAME[m] + ': añadir alimentos' : MEAL_NAME[m] + ' con cambios'}</h2><div class="sub">${plan ? 'Busca o escanea lo que quieras añadir. No se marca como hecha: el resto del día se recoloca con esto.' : 'Pon lo que has comido de verdad.'}</div>
+  sheet(`<h2>${plan ? MEAL_NAME[m] + ': añadir alimentos' : MEAL_NAME[m] + ' con cambios'}</h2><div class="sub">${plan ? 'Busca, hazle una foto o escanea lo que quieras añadir. No se marca como hecha: el resto del día se recoloca con esto.' : 'Pon lo que has comido de verdad.'}</div>
     <div id="ed"></div>
     <label class="f">Añadir alimento</label>
-    <div class="row"><input id="addq" type="search" placeholder="Busca: pavo, yogur proteínas, tortitas…" autocomplete="off"><button class="btn sm" data-x="scan" aria-label="Escanear código">📷</button></div>
+    <input id="addq" type="search" placeholder="Busca: pavo, yogur proteínas, tortitas…" autocomplete="off" style="width:100%">
+    <div class="row" style="margin-top:8px"><button class="btn sm" data-x="foto">📸 Foto del alimento</button><button class="btn sm" data-x="scan">🏷️ Código de barras</button></div>
     <div id="addres" class="stack" style="margin-top:8px"></div>
     <div class="muted num" id="edsum" style="margin:14px 0 8px"></div>
     ${plan ? '' : `<label class="f">Hora</label>${timeInput('at', Math.min(nowFor(viewDay()), D.meals[m].t))}`}
@@ -1329,6 +1330,7 @@ function sheetEdit(m, init = null, mode = 'log'){
       if (p){ const id = p.dataset.pick; useMDB(id); items.push({id, g: FOODS[id].u || 100, fijo:true}); el.querySelector('#addq').value = ''; el.querySelector('#addres').innerHTML = ''; draw(el); return; }
       const x = e.target.closest('[data-x]'); if (!x) return;
       if (x.dataset.x === 'scan') return sheetScan(id => sheetEdit(m, items.concat({id, g:FOODS[id].u || 100, fijo:true}), mode));
+      if (x.dataset.x === 'foto') return fotoAlimento(m, items, mode);
       if (x.dataset.x === 'cancel') closeSheet();
       if (x.dataset.x === 'ok' && plan){
         const day = getDay(k); day.planEdit = day.planEdit || {};
@@ -1666,6 +1668,89 @@ function pickPhoto(m, cam){
     }
   });
   inp.click();
+}
+// 📸 en «añadir alimentos»: la IA reconoce UN alimento de la foto y cuánto hay; eliges el producto (Mercadona, tu
+// alimento base o sus valores) y vuelves a la lista con lo que ya tenías, para seguir añadiendo.
+function fotoAlimento(m, items, mode){
+  if (!aiKey()){ toast('Para la foto hace falta tu API key de Anthropic (en Ajustes)'); return; }
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; // cámara o galería
+  inp.addEventListener('change', async () => {
+    const f = inp.files[0]; if (!f) return;
+    const volver = nuevo => sheetEdit(m, nuevo ? items.concat(nuevo) : items, mode);
+    sheet(`<h2>📸 Foto del alimento</h2><div class="sub">La IA está mirando qué es y cuánto hay…</div><div class="empty">Un momento.</div>`);
+    try{
+      const photo = await readPhoto(f);
+      const [r] = await Promise.all([aiFood(photo), loadMDB().catch(() => null)]);
+      sheetFotoAlimento(r, photo, volver);
+    }catch(err){
+      sheet(`<h2>📸 Foto del alimento</h2><ul class="tips"><li class="coral">${esc(aiErrorText(err))}</li></ul>
+        <div class="evactions"><button class="btn pri" data-x="back">Volver a la lista</button></div>`, el => {
+        el.addEventListener('click', e => { if (e.target.closest('[data-x]')) volver(); });
+      });
+    }
+  });
+  inp.click();
+}
+async function aiFood(photo){
+  const db = Object.entries(FOODS).filter(([id, F]) => F.sec && !F.mid).map(([id, F]) =>
+    `${id}: ${F.n} — por 100 ${F.ml ? 'ml' : 'g'}: ${F.k} kcal, ${F.p} g prot, ${F.c} g hidratos, ${F.f} g grasa${F.u ? ` (1 unidad ≈ ${F.u} g)` : ''}`).join('\n');
+  const system = `Eres el asistente de nutrición de una app de dieta personal. El usuario hace una foto de UN alimento para añadirlo a una comida (compra en Mercadona, en España). Identifícalo y estima cuánto hay.
+
+Alimentos base de la app:
+${db}
+
+Cómo rellenar la respuesta:
+- nombre: qué es, corto y en español («Yogur griego natural», «Plátano», «Pechuga de pavo en lonchas»).
+- base: el id de la lista de arriba si es claramente ese alimento; si no, "ninguno".
+- buscar: 2–4 palabras para encontrarlo entre los productos de Mercadona (el producto, y la marca si se lee en el envase; sin cantidades).
+- g: gramos (o ml si es líquido) que hay en la foto. Si es un envase cerrado, una ración normal; si se lee el peso de una unidad, úsalo.
+- unidad_g: peso de una pieza si se come por piezas (huevo, fruta, yogur, galleta…); 0 si no.
+- por_100: kcal y macros por 100 g. Si se ve la tabla nutricional del envase, cópiala; si no, valores típicos de una tabla española (tipo BEDCA).
+- grupo: prot (carne, pescado, huevo), carb (pan, arroz, pasta, cereales, patata), grasa (aceite, frutos secos), fruta, verd, lacteo, snack (dulces, bollería, aperitivos), otro.
+- confianza: "baja" si no se distingue bien qué es o cuánto hay.`;
+  const ids = Object.keys(FOODS).filter(id => FOODS[id].sec && !FOODS[id].mid);
+  const schema = {type:'object', additionalProperties:false, required:['nombre', 'base', 'buscar', 'g', 'unidad_g', 'por_100', 'grupo', 'confianza'],
+    properties:{nombre:{type:'string'}, base:{type:'string', enum:ids.concat(['ninguno'])}, buscar:{type:'string'}, g:{type:'number'}, unidad_g:{type:'number'},
+      por_100:{type:'object', additionalProperties:false, required:['kcal', 'p', 'c', 'f'], properties:{kcal:{type:'number'}, p:{type:'number'}, c:{type:'number'}, f:{type:'number'}}},
+      grupo:{type:'string', enum:['prot', 'carb', 'grasa', 'fruta', 'verd', 'lacteo', 'snack', 'otro']}, confianza:{type:'string', enum:['alta', 'media', 'baja']}}};
+  return aiCall(system, [{type:'image', source:{type:'base64', media_type:'image/jpeg', data:photo}}, {type:'text', text:'¿Qué alimento es y cuánto hay?'}], schema);
+}
+// Opciones: primero los productos de Mercadona que se le parecen y tienen unas kcal parecidas (±25 %), luego tu
+// alimento base, luego los valores de la IA y al final el resto de productos encontrados.
+function sheetFotoAlimento(r, photo, volver){
+  const P = r.por_100 || {}, k100 = +P.kcal || 0;
+  const cerca = id => k100 > 0 && Math.abs(FOODS[id].k - k100) / k100 <= 0.25;
+  const merca = MDB ? searchFoods(r.buscar || r.nombre, {limit:6, base:false}).filter(id => useMDB(id)) : [];
+  const ops = merca.filter(cerca).concat(FOODS[r.base] && !FOODS[r.base].mid ? [r.base] : [], ['ia'], merca.filter(id => !cerca(id)));
+  let sel = ops[0];
+  const nombre = id => id === 'ia' ? `${r.nombre} (valores de la IA)` : dispName(id);
+  const valores = id => id === 'ia' ? `${R(k100)} kcal · ${R(P.p)} g P` : `${R(FOODS[id].k)} kcal · ${R(FOODS[id].p)} g P`;
+  sheet(`<h2>📸 ${esc(r.nombre)}</h2>
+    <img src="data:image/jpeg;base64,${photo}" alt="Tu foto" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin:6px 0">
+    <div class="sub">Elige el producto que más se parece${r.confianza === 'baja' ? ' <span class="badge late">confianza baja</span>' : ''}. Valores por 100 g.</div>
+    <div class="stack">${ops.map(id => `<button class="opt ${id === sel ? 'sel' : ''}" data-op="${id}"><span>${esc(nombre(id))}</span><span class="d num">${valores(id)}</span></button>`).join('')}</div>
+    <label class="f">Cantidad</label>
+    <div class="row"><input id="fg" type="number" inputmode="decimal" min="0" step="5" value="${R(r.g)}" style="flex:1"><span class="muted">g o ml</span></div>
+    <div class="evactions"><button class="btn ghost" data-x="back">Volver</button><button class="btn pri" data-x="add">Añadir</button></div>`, el => {
+    el.addEventListener('click', e => {
+      const o = e.target.closest('[data-op]');
+      if (o){ sel = o.dataset.op; el.querySelectorAll('[data-op]').forEach(b => b.classList.toggle('sel', b === o)); return; }
+      const x = e.target.closest('[data-x]'); if (!x) return;
+      if (x.dataset.x === 'back') return volver();
+      const g = parseFloat(String(el.querySelector('#fg').value).replace(',', '.')) || 0;
+      if (g <= 0) return toast('Pon la cantidad');
+      const id = sel === 'ia' ? alimentoIA(r) : sel;
+      useMDB(id); keepFood(id); save();
+      volver({id, g, fijo:true});
+    });
+  });
+}
+// Lo que la IA ha sacado de una foto y no está en la base: se guarda como producto propio, con valores aproximados
+function alimentoIA(r){
+  const id = 'ia' + Date.now().toString(36), P = r.por_100;
+  FOODS[id] = Object.assign({n:r.nombre, g:DB_GROUP[r.grupo] || 'otro', k:+P.kcal || 0, p:+P.p || 0, c:+P.c || 0, f:+P.f || 0, sec:'Foto (IA)', mid:true, q:'b'},
+    r.unidad_g > 0 ? {u:r.unidad_g, un:['ud.', 'uds.']} : {});
+  return id;
 }
 function sheetAI(m){
   if (!aiKey()){ closeSheet(); TAB = 'ajustes'; render(); toast('Primero pon tu API key de Anthropic'); return; }
