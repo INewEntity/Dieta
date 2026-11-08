@@ -166,7 +166,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 52;
+const VERSION = 53;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -249,6 +249,10 @@ const WEEK = {
   5:{almuerzo:ALM.pollo_arroz,cena:CEN.salmon},
   6:{almuerzo:ALM.ternera_pasta,cena:CEN.atun},
 };
+// Tus alimentos: los del menú (lo que compras cada semana) y los que hayas puesto en la despensa, menos lo que se acabó
+// o quitaste. El resto de la lista base (claras, yogur proteico, pavo…) no lo tienes: la app no te lo pone por su cuenta.
+const MENU_IDS = new Set([DESAYUNO, BATIDO, ...Object.values(ALM), ...Object.values(CEN)].flat().map(x => x[0]));
+const esTuyo = id => !noHay(id) && (MENU_IDS.has(id) || !!(S.despensa || {})[id]);
 const MEAL_NAME = {desayuno:'Desayuno',almuerzo:'Almuerzo',merienda:'Batido',cena:'Cena'};
 // Copas de fiesta: valores genéricos por unidad (el alcohol da 7 kcal/g y no cuenta como hidratos ni grasa)
 const COPAS = {
@@ -682,7 +686,8 @@ function basePlan(k, sch, opts = {}){
         const g = FOODS[it.id].g, key = GROUP_KEY[g] || 'k';
         const enCasa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === g && !noHay(id) && FOODS[id][key] > 0)
           .sort((a, b) => S.despensa[b] - S.despensa[a]);
-        const alt = enCasa[0] || (ALTS[g] || []).find(a => a !== it.id && !noHay(a) && (FOODS[a].sec || a === 'agua'));
+        const alts = (ALTS[g] || []).filter(a => a !== it.id && !noHay(a) && (FOODS[a].sec || a === 'agua'));
+        const alt = enCasa[0] || alts.find(esTuyo) || alts[0];
         if (alt) return Object.assign({id:alt, g:equiv(it.id, it.g, alt), from:it.id, why:'falta'}, fijo);
         return Object.assign({}, it, {missing:true});
       }
@@ -978,6 +983,8 @@ function computeDay(k){
         tips.push({cls:'', html:`Aun así te quedan <b>${R(-over)} kcal</b> por debajo: no caben sin cargar demasiado lo que queda. Se compensan en lo que queda de semana.`});
       }
     }
+    const faltaP = TP - consumed.p - sumRest('p');
+    if (faltaP > 10) tips.push({cls:'amber', html:`Aun así te faltan <b>${R(faltaP)} g de proteína</b>: con tus alimentos no caben más en lo que queda. Si tienes algo proteico a mano, añádelo con «Añadir un alimento».`});
   }
   // marcar cambios visibles
   for (const m of pending) markDeltas(meals[m]);
@@ -991,31 +998,22 @@ function computeDay(k){
 function computeSchedule(k){ return schedule(k); }
 
 const esMagro = id => FOODS[id].f <= FOODS[id].p * 0.5; // menos de 0,5 g de grasa por g de proteína
+// La proteína que falta por lo comido antes se recupera solo con tus alimentos (esTuyo). El desayuno no cambia (es
+// fijo); en el batido solo sube la leche (hasta 250 ml más: la proteína en polvo va siempre en 30 g); en almuerzo y
+// cena crece el plato principal si es magro y, si aún falta, se añade algo magro que tengas (atún, pollo, merluza o lo
+// que hayas puesto en la despensa). Antes podía añadir claras o un yogur proteico aunque no los compraras.
 function boostProtein(meal, wantP){
   const items = meal.items, quitado = id => (meal.quitados || []).includes(id);
-  if (meal.key === 'desayuno'){
-    if (quitado('claras')) return ZERO;
-    const g = roundG('claras', wantP / FOODS.claras.p * 100);
-    items.push({id:'claras', g, added:true});
-    meal.notes.push(`+${amount('claras', g)} de claras para recuperar proteína.`);
-    return mac('claras', g);
-  }
+  if (meal.key === 'desayuno') return ZERO;
   if (meal.key === 'merienda'){
-    // primero más proteína en polvo (hasta +20 g), luego un yogur proteico si aún falta
-    let got = ZERO;
-    const w = items.find(x => x.id === 'whey' && !x.fijo);
-    if (w){
-      const before = w.g, g = Math.min(before + 20, roundG('whey', before + wantP / FOODS.whey.p * 100));
-      if (g > before){ w.orig = w.orig ?? before; w.g = g; got = mac('whey', g - before); meal.notes.push(`+${g - before} g de proteína en polvo en el batido.`); }
-    }
-    const rest = wantP - got.p;
-    if (rest > 5 && !quitado('yogurp')){
-      const g = roundG('yogurp', rest / FOODS.yogurp.p * 100);
-      items.push({id:'yogurp', g, added:true});
-      meal.notes.push(`+${amount('yogurp', g)} para recuperar proteína.`);
-      got = addM(got, mac('yogurp', g));
-    }
-    return got;
+    const l = items.find(x => x.id === 'leche' && !x.fijo); if (!l || !esTuyo('leche')) return ZERO;
+    // el tope cuenta desde lo que llevaba el batido, aunque se pida más de una vez
+    const before = l.g, base = l.orig ?? before, g = Math.min(base + 250, Math.ceil((before + wantP / FOODS.leche.p * 100) / 50) * 50);
+    if (g <= before) return ZERO;
+    l.orig = base; l.g = g;
+    meal.notes = meal.notes.filter(n => !n.includes('ml de leche en el batido'));
+    meal.notes.push(`+${g - base} ml de leche en el batido para recuperar proteína.`);
+    return mac('leche', g - before);
   }
   // el plato principal solo crece si es magro; si es ternera, salmón o sardinas, la proteína va en un extra magro
   const main = items.filter(x => FOODS[x.id].g === 'prot' && x.id !== 'huevo' && !x.fromBatido && !x.fijo && esMagro(x.id)).sort((a,b)=>mac(b.id,b.g).p - mac(a.id,a.g).p)[0];
@@ -1031,11 +1029,12 @@ function boostProtein(meal, wantP){
   }
   const rest = wantP - got.p;
   if (rest > 5){
-    const extra = items.some(x => x.id === 'huevo') ? 'claras' : 'atun';
-    if (quitado(extra)) return got;
+    const despensa = Object.keys(S.despensa || {}).filter(id => FOODS[id] && FOODS[id].g === 'prot' && FOODS[id].p >= 15 && esMagro(id));
+    const extra = ['atun', 'pollo', 'merluza'].concat(despensa).find(id => esTuyo(id) && !quitado(id) && !items.some(x => x.id === id && !x.added));
+    if (!extra) return got;
     const g = roundG(extra, rest / FOODS[extra].p * 100);
     items.push({id:extra, g, added:true});
-    meal.notes.push(`+${amount(extra, g)} de ${FOODS[extra].n.toLowerCase()}${extra === 'claras' ? ' (en la tortilla con los huevos)' : ''}.`);
+    meal.notes.push(`+${amount(extra, g)} de ${dispName(extra).toLowerCase()} para recuperar proteína.`);
     got = addM(got, mac(extra, g));
   }
   return got;
@@ -1934,7 +1933,7 @@ function sheetAIReview(m, r, at){
 // Para una comida pendiente: la IA propone 1–3 versiones completas de esa comida que cuadran el día,
 // usando primero lo que hay en casa y, si hace falta, productos de Mercadona. Cada opción se puede aplicar
 // a la comida (cantidades fijadas, sin marcarla como hecha) y el resto del día se recoloca.
-const enCasa = id => !noHay(id) && (FOODS_BASE[id] ? !!FOODS[id].sec : !!(S.despensa || {})[id]);
+const enCasa = esTuyo; // lo del menú y la despensa (antes contaba como «en casa» toda la lista base)
 function coachContext(m){
   const D = computeDay(viewDay()), M = D.meals[m];
   const T = {k: D.TK, p: D.OBJ.p, c: D.OBJ.c, f: D.OBJ.f};
