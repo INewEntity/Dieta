@@ -166,7 +166,7 @@ table.t td:first-child,table.t th:first-child{text-align:left}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 51;
+const VERSION = 52;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -277,7 +277,7 @@ const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov
 
 /* ===================== Estado ===================== */
 const DEFAULTS = {
-  settings:{kcal:2500,prot:160,wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',lateDinner:'23:00',theme:'auto',aiModel:'claude-opus-5-5',
+  settings:{kcal:2500,prot:160,wake:'09:00',bed:'00:45',trainTime:'12:00',trainDur:75,trainDays:[1,2,4,5],gap:150,dinnerLimit:'22:30',theme:'auto',aiModel:'claude-opus-5-5',
     avisos:{comidas:true,buenosdias:true,resumen:true,compra:true,cintura:true}},
   days:{}, weights:{}, waist:{}, pantry:{}, shop:{}, ai:{spent:{}, calls:{}},
 };
@@ -458,11 +458,42 @@ function trainOf(k){
   const on = t.on !== undefined ? t.on : S.settings.trainDays.includes(wd);
   // antes de las 5:00 es la noche de este mismo día (como en «Hecha a otra hora»)
   let start = toMin(t.time || S.settings.trainTime); if (start < 300) start += 1440;
-  return {on, start, dur: t.dur || S.settings.trainDur, done: !!t.done, custom: t.on !== undefined || !!t.time};
+  return {on, start, dur: t.dur || S.settings.trainDur, done: !!t.done, horaPuesta: !!t.time};
 }
 function wakeOf(k){ const d = getDay(k); return toMin(d.wake || S.settings.wake); }
 // hora de acostarse: la de Ajustes, o 1 h después de acabar de entrenar si entrenas tan tarde que no da tiempo
 function bedFor(tr){ return Math.max(bedMin(), tr && tr.on ? tr.start + tr.dur + 60 : 0); }
+// hora límite de la cena (de Ajustes); si es pasada la medianoche, cuenta como de este mismo día
+function limiteCena(){ let l = toMin(S.settings.dinnerLimit); if (l < 300) l += 1440; return l; }
+// Horario real, sacado de lo que apuntas en los últimos 14 días: a qué hora te levantas (o desayunas, menos media
+// hora) y tu última comida (más 1 h 15 para acostarte). Hacen falta 4 días con datos de cada cosa.
+function horarioReal(){
+  const hoy = dayKey(), wakes = [], ultimas = [];
+  for (let i = 1; i <= 14; i++){
+    const d = S.days[addDays(hoy, -i)]; if (!d) continue;
+    const des = (d.meals || {}).desayuno;
+    if (d.wake) wakes.push(toMin(d.wake));
+    else if (des && des.at != null && !['pending', 'skipped', 'moved'].includes(des.status)) wakes.push(des.at - 30);
+    const ats = Object.values(d.meals || {}).filter(l => l.at != null && !['pending', 'skipped'].includes(l.status)).map(l => l.at);
+    if (ats.length >= 3) ultimas.push(Math.max(...ats));
+  }
+  const med = xs => { const o = xs.slice().sort((a, b) => a - b), n = o.length; return n % 2 ? o[(n - 1) / 2] : (o[n / 2 - 1] + o[n / 2]) / 2; };
+  const q15 = x => Math.round(x / 15) * 15;
+  const w = wakes.filter(x => x >= 300 && x <= 17 * 60), u = ultimas.filter(x => x >= 18 * 60);
+  if (w.length < 4 || u.length < 4) return null;
+  const bed = q15(med(u) + 75);
+  return {wake: q15(med(w)), bed, cena: q15(bed - 150)};
+}
+// ¿Proponer el horario real? Si se aleja 45 min o más del de Ajustes y no lo has descartado hace poco
+// («Ahora no» lo calla 7 días, salvo que tu horario vuelva a moverse otros 45 min).
+function horarioPropuesto(ignorarNo = false){
+  const h = horarioReal(); if (!h) return null;
+  const dif = (a, b) => Math.abs(a - b);
+  if (dif(h.wake, toMin(S.settings.wake)) < 45 && dif(h.bed, bedMin()) < 45) return null;
+  const no = S.horarioNo;
+  if (!ignorarNo && no && dayKey() <= no.hasta && dif(no.wake, h.wake) < 45 && dif(no.bed, h.bed) < 45) return null;
+  return h;
+}
 
 function desiredTimes(wake, tr){
   const bk = wake + 30, dinnerBase = wake + 720;
@@ -472,24 +503,31 @@ function desiredTimes(wake, tr){
     const d = Math.max(bk, tE + 20), a = d + 240, m = a + 180;
     return {desayuno:d, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 150)};
   }
-  // si entrenas en las 4 h siguientes al desayuno, el desayuno es la comida de antes y el almuerzo va después
-  if (tS - bk <= 240){ const a = Math.max(bk + 150, tE + 30), m = a + 195; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 165)}; }
+  // si entrenas menos de 4 h después de desayunar, el desayuno es la comida de antes y el almuerzo va después (con 4 h
+  // o más cabe un almuerzo antes de entrenar; si no, quedaban casi 6 h sin comer)
+  if (tS - bk < 240){ const a = Math.max(bk + 150, tE + 30), m = a + 195; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 165)}; }
   // de noche (la cena de después ya no cabría antes de la hora límite): la cena va unas 2 h antes de entrenar y el
   // batido al acabar, como proteína antes de dormir; el almuerzo, a medio camino entre el desayuno y la cena
-  if (tE + 30 > toMin(S.settings.dinnerLimit)){
-    const c = tS - 120, a = Math.max(bk + 240, Math.round((bk + c) / 10) * 5);
+  if (tE + 30 > limiteCena()){
+    // si te levantas tarde, el almuerzo se acerca al desayuno (como pronto 2 h 30 después) para que la cena quepa antes
+    const c = tS - 120, a = Math.max(bk + 150, Math.min(Math.max(bk + 240, Math.round((bk + c) / 10) * 5), c - S.settings.gap));
     return {desayuno:bk, almuerzo:a, cena:c, merienda:tE + 15, noche:true};
   }
-  // por la tarde: almuerzo unas 2 h 30 antes de entrenar y el batido al acabar
-  if (tS < 19*60){ const a = Math.min(bk + 270, Math.max(bk + 150, tS - 150)), m = tE + 15; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 150)}; }
+  // por la tarde: almuerzo unas 2 h 30 antes de entrenar y el batido al acabar. También a última hora si te has
+  // levantado tarde y antes de entrenar no caben el almuerzo y el batido (hacen falta 8 h desde el desayuno)
+  if (tS < 19*60 || tS - bk < 480){ const a = Math.min(bk + 270, Math.max(bk + 150, tS - 150)), m = tE + 15; return {desayuno:bk, almuerzo:a, merienda:m, cena:Math.max(dinnerBase, m + 150)}; }
   // a última hora de la tarde: el batido unas 2 h 30 antes de entrenar y la cena al acabar
   const a = bk + 270; return {desayuno:bk, almuerzo:a, merienda:Math.max(a + 180, tS - 150), cena:tE + 30};
 }
 
 function schedule(k){
-  const day = getDay(k), tr = trainOf(k), wake0 = wakeOf(k);
-  // si entrenas antes de tu hora de despertar, ese día te levantas antes: media hora antes de entrenar
-  const wake = tr.on && tr.start < wake0 ? Math.max(0, tr.start - 30) : wake0;
+  const day = getDay(k), tr0 = trainOf(k), wake0 = wakeOf(k);
+  // Un entreno por defecto (ese día no has puesto hora) que cae antes de levantarte no ha podido ser a esa hora: ese
+  // día va «sin hora» y se planifica como descanso hasta que digas cuándo entrenas (o le des a «Empiezo ahora»).
+  const tr = tr0.on && !tr0.horaPuesta && tr0.start < wake0 ? Object.assign({}, tr0, {on:false, sinHora:true}) : tr0;
+  // si entrenas (con hora puesta) antes de tu hora de despertar, ese día te levantas antes: media hora antes de
+  // entrenar. Si has dicho a qué hora te has levantado, manda eso.
+  const wake = tr.on && tr.start < wake0 && !day.wake ? Math.max(0, tr.start - 30) : wake0;
   const want = desiredTimes(wake, tr), noche = !!want.noche, bed = bedFor(tr), juntas = day.juntas || {};
   if (wake < wake0) want.cena = Math.max(want.cena, 20*60 + 30); // madrugar para entrenar no adelanta la hora de dormir
   // de noche el batido va después de la cena (es lo de después de entrenar)
@@ -532,7 +570,7 @@ function schedule(k){
     }
   }
   for (const m of order) if (out[m].junta) out[m].t = out[out[m].junta].t;
-  const limit = toMin(S.settings.dinnerLimit), C = out.cena, B = out.merienda && !out.merienda.junta ? out.merienda : null;
+  const limit = limiteCena(), C = out.cena, B = out.merienda && !out.merienda.junta ? out.merienda : null;
   if (noche){
     // si la cena ya no cabe antes de entrenar (p. ej. por un almuerzo muy tarde), queda después y el batido va con ella
     if (B && B.status === 'pending' && C.status === 'pending' && C.t >= tE) B.merged = true;
@@ -658,6 +696,8 @@ function basePlan(k, sch, opts = {}){
   for (const [a, b] of Object.entries(day.juntas || {})) if (plan[a] && plan[b] && juntaActiva(day, sch, a)){ plan[b] = juntarPlatos(plan[a], plan[b], a); plan[a] = []; }
   return plan;
 }
+// nombre de una comida en su tarjeta y en los avisos («Desayuno + almuerzo» si van juntas)
+const nombreComida = M => M.juntaDe === 'desayuno' ? 'Desayuno + almuerzo' : M.juntaDe ? MEAL_NAME[M.key] + ' + ' + MEAL_NAME[M.juntaDe].toLowerCase() : MEAL_NAME[M.key];
 // ¿la comida a va hoy junto con la suya? (pendientes las dos, o ya registrada con ella)
 function juntaActiva(day, sch, a){
   const t = sch.times[a], b = (day.juntas || {})[a];
@@ -872,8 +912,9 @@ function computeDay(k){
     const what = hecho.length > 1 ? hecho.slice(0, -1).join(', ') + ' y ' + hecho[hecho.length - 1] : (hecho[0] || 'algo');
     return {got, left: Math.max(0, cut), what, prot};
   }
-  // 3) Cena tardía (salvo que sea la comida de después de entrenar: ahí los hidratos hacen falta)
-  const late = toMin(S.settings.lateDinner);
+  // 3) Cena tardía: a menos de hora y media de acostarte (salvo que sea la comida de después de entrenar: ahí los
+  // hidratos hacen falta). Antes era a partir de las 23:00 fijas, aunque te acostaras a las 2:00.
+  const late = sch.bed - 90;
   if (meals.cena.status === 'pending' && !meals.cena.locked && meals.cena.t >= late && postEntreno !== 'cena'){
     const carbK = meals.cena.items.filter(x=>FOODS[x.id].g==='carb' && !x.fijo).reduce((a,x)=>a+mac(x.id,x.g).k,0);
     const got = scaleGroup([meals.cena], 'carb', -carbK*0.4, 0.6);
@@ -913,12 +954,14 @@ function computeDay(k){
         its.forEach(it => { const g = roundG(it.id, it.g * f); if (g !== it.g){ it.orig = it.orig ?? it.g; it.g = g; } });
       };
       const k0 = sumRest('k');
-      fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25);
-      fit('grasa', 'f', OBJ.f - consumed.f - sumRest('f'), 3, 0.2, 2);
+      // la comida juntada ya va a su tope (JUNTA_MAX): lo que haya que subir, en las demás
+      const sube = ms.filter(M => !M.juntaDe), donde = gap => gap > 0 ? sube : ms;
+      let gp = TP - consumed.p - sumRest('p'); fit('prot', 'p', gp, 3, 0.5, 1.25, donde(gp));
+      const gf = OBJ.f - consumed.f - sumRest('f'); fit('grasa', 'f', gf, 3, 0.2, 2, donde(gf));
       const gapK = TK - consumed.k - copas.k - sumRest('k');
-      if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, ms.filter(M => !(M.key === 'cena' && M.t >= late && postEntreno !== 'cena') && !M.juntaDe));
+      if (gapK > 0) fit('carb', 'k', gapK, 25, 0.4, 1.3, sube.filter(M => !(M.key === 'cena' && M.t >= late && postEntreno !== 'cena')));
       else if (gapK < -25) carbDown(ms, -gapK);
-      fit('prot', 'p', TP - consumed.p - sumRest('p'), 3, 0.5, 1.25); // el pan, la pasta o la avena también traen proteína
+      gp = TP - consumed.p - sumRest('p'); fit('prot', 'p', gp, 3, 0.5, 1.25, donde(gp)); // el pan, la pasta o la avena también traen proteína
       const dk = sumRest('k') - k0;
       if (dk < -60 && !copas.k) tips.push({cls:'amber', html:`Con lo apuntado ibas <b>${R(-dk)} kcal por encima</b>. He ajustado lo que queda (menos hidratos y grasa), sin bajar de tu proteína.`});
       else if (dk > 60) tips.push({cls:'', html:`Te faltaban <b>${R(dk)} kcal</b> por lo apuntado. Las he repartido en lo que queda del día.`});
@@ -1064,7 +1107,7 @@ function renderHoy(){
   ${isToday ? '' : `<ul class="tips"><li class="amber">Estás viendo un <b>día pasado</b>. Lo que marques aquí corrige tu historial. <button class="stp-reset" data-act="daytoday">Volver a hoy</button></li></ul>`}
   <div class="chips">
     <button class="chip" data-act="wake">☀️ ${day.wake ? 'Levantado ' + day.wake : 'Despertar ' + fmt(D.sch.wake)}</button>
-    <button class="chip ${tr.on?'on':''}" data-act="train">🏋️ ${tr.on ? (tr.done ? 'Entrenado ' : 'Entreno ') + fmt(tr.start) : 'Descanso'}</button>
+    <button class="chip ${tr.on?'on':''}" data-act="train">🏋️ ${tr.on ? (tr.done ? 'Entrenado ' : 'Entreno ') + fmt(tr.start) : tr.sinHora ? '¿A qué hora entrenas?' : 'Descanso'}</button>
     <button class="chip ${D.copas.n?'on':''}" data-act="fiesta">🍸 ${D.copas.n ? D.copas.n + ' copa' + (D.copas.n === 1 ? '' : 's') : 'Fiesta'}</button>
   </div>
   <section class="card hero" aria-label="Resumen">
@@ -1078,6 +1121,8 @@ function renderHoy(){
   </section>`;
   // avisos inteligentes
   const tips = D.tips.slice();
+  const hp = isToday && horarioPropuesto();
+  if (hp) tips.push({cls:'', html:`🕐 Por lo que apuntas, te levantas sobre las <b>${fmt(hp.wake)}</b> y te acuestas sobre las <b>${fmt(hp.bed)}</b>, pero en Ajustes pone ${S.settings.wake} y ${S.settings.bed}. Con tu horario real, los avisos te llegan despierto y las comidas se reparten mejor. <button class="stp-reset" data-act="horario-usar">Usar mi horario</button> <button class="stp-reset" data-act="horario-no">Ahora no</button>`});
   const pend = D.sch.order.filter(m => D.meals[m].status === 'pending' && !D.meals[m].merged);
   const overdue = pend.filter(m => now > D.meals[m].t + 45);
   if (!isToday){ if (pend.length) tips.push({cls:'', html:`Quedaron <b>${pend.length} comida${pend.length === 1 ? '' : 's'} sin registrar</b>. Si las hiciste, márcalas para que tu historial y el % de Progreso sean reales.`}); }
@@ -1146,7 +1191,7 @@ function mealCard(M, now){
     ? `<div class="evactions"><button class="btn pri" data-act="done" data-m="${M.key}">✓ Hecha</button><button class="btn sm" data-act="foto" data-m="${M.key}" aria-label="Foto de lo que he comido">📷</button><button class="btn sm" data-act="coach" data-m="${M.key}" aria-label="¿Cómo completo lo que me falta?">✨</button><button class="btn sm" data-act="more" data-m="${M.key}" aria-label="Más opciones">Opciones</button></div>`
     : `<div class="evactions"><button class="btn sm ghost" data-act="undo" data-m="${M.key}">Deshacer</button></div>`;
   return `<div class="ev ${st!=='pending'?'dim':''}" data-swipe="${st==='pending'?M.key:''}"><div class="swipebg">✓ Hecha</div><div class="card">
-    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${M.juntaDe === 'desayuno' ? 'Desayuno + almuerzo' : M.juntaDe ? MEAL_NAME[M.key] + ' + ' + MEAL_NAME[M.juntaDe].toLowerCase() : MEAL_NAME[M.key]}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
+    <div class="evhead"><div class="evtime num">${fmt(M.t)}</div><div class="evname">${nombreComida(M)}</div>${badge}</div>${macros}${items}${notes}${actions}</div></div>`;
 }
 
 /* ===================== Acciones de comidas ===================== */
@@ -1422,7 +1467,8 @@ function sheetOther(m){
 }
 
 function sheetSwap(m, i){
-  const k = viewDay(), D = computeDay(k), it = D.meals[m].items[i], locked = !!D.meals[m].editado;
+  // en la comida juntada el cambio va en sus cantidades: por posición no cuadra con el plan (la fruta del desayuno daba error)
+  const k = viewDay(), D = computeDay(k), it = D.meals[m].items[i], locked = !!D.meals[m].editado || !!D.meals[m].juntaDe;
   // en una comida con cantidades fijadas se cambia lo que hay ahora; si no, se parte del plan original
   const base = locked ? it : basePlan(k, D.sch, {noSwaps:true})[m][i];
   const orig = base.id, origG = base.g;
@@ -1509,10 +1555,10 @@ function sheetWake(){
 }
 
 function sheetTrain(){
-  const k = viewDay(), day = getDay(k), tr = trainOf(k), hoy = k === dayKey(), now = nowMin();
+  const k = viewDay(), day = getDay(k), tr = trainOf(k), hoy = k === dayKey(), now = nowMin(), sinHora = !!schedule(k).tr.sinHora;
   // si pusiste la hora de inicio (o diste a «Empiezo ahora») hace menos de 4 h, al acabar cuenta lo que has tardado de verdad
   const empezado = hoy && tr.on && !!(day.train && day.train.time) && tr.start <= now && now - tr.start <= 240;
-  sheet(`<h2>Entreno de hoy</h2><div class="sub">${tr.on ? 'Previsto a las ' + fmt(tr.start) : 'Hoy no hay entreno previsto'}. Cambia lo que haga falta.</div>
+  sheet(`<h2>Entreno de hoy</h2><div class="sub">${sinHora ? `Hoy toca entreno, pero a las ${fmt(tr.start)} aún no te has levantado: pon la hora o dale a «Empiezo ahora» cuando vayas` : tr.on ? 'Previsto a las ' + fmt(tr.start) : 'Hoy no hay entreno previsto'}. Cambia lo que haga falta.</div>
     ${hoy ? `<div class="evactions" style="margin:0 0 12px"><button class="btn" data-x="ahora">▶️ Empiezo ahora</button><button class="btn pri" data-x="fin">🏁 Acabo de terminar</button></div>` : ''}
     <div class="seg" style="margin-bottom:12px"><button data-x="on" class="${tr.on?'on':''}">Entreno hoy</button><button data-x="off" class="${!tr.on?'on':''}">Descanso</button></div>
     <div ${tr.on?'':'hidden'} id="trbox">
@@ -1904,8 +1950,19 @@ function foodRow(id, casa){
   if (casa) o.en_casa = true;
   return o;
 }
+// Lo que el usuario ha decidido de su dieta: la IA lo respeta salvo que él pida otra cosa
+function normasUsuario(){
+  const lista = (arr, fijo) => arr.filter(x => !!x[2] === fijo).map(([id, g]) => fijo ? `${amount(id, g)} (${dispName(id)})` : dispName(id)).join(', ');
+  return `Normas del usuario (respétalas siempre, salvo que él pida otra cosa):
+- Nunca patata: si hace falta, batata.
+- Verdura: solo ${ALTS.verd.map(id => FOODS_BASE[id].n.toLowerCase()).join(' y ')}.
+- El desayuno es fijo: ${lista(DESAYUNO, true)}. No lo cambies; ${lista(DESAYUNO, false)} sí se puede ajustar.
+- En el batido, ${lista(BATIDO, true)} siempre; ${lista(BATIDO, false)} sí se pueden ajustar.`;
+}
 function coachSystem(){
   return `Eres el asistente de nutrición de una app de dieta personal. El usuario es un chico de 26 años en volumen lento que entrena fuerza; la proteína es lo prioritario. Para UNA comida concreta propones cómo completarla para que el día llegue a sus objetivos.
+
+${normasUsuario()}
 
 Recibes: lo que debería aportar esta comida ("a_cubrir_en_esta_comida", ya descontado lo que ha comido hoy y lo que aportarán las demás comidas pendientes), lo que lleva ahora, su despensa (alimentos con "en_casa") y una preselección de productos de Mercadona, donde compra.
 
@@ -1937,7 +1994,7 @@ async function coachAsk(m, pregunta, previa){
     const add = ids => ids.forEach(id => { if (!casa.includes(id) && !merc.includes(id) && useMDB(id) && FOODS[id].q !== 'b') merc.push(id); });
     if (pregunta) add(candidatesFor(pregunta, 12));
     if (C.cubrir.p > 10) add(searchFoods('pechuga pavo pollo atun claras merluza yogur proteinas queso batido', {group:'prot', limit:8, base:false}));
-    if (C.cubrir.c > 25) add(searchFoods('arroz pasta patata pan tortitas avena', {group:'carb', limit:5, base:false}));
+    if (C.cubrir.c > 25) add(searchFoods('arroz pasta batata pan tortitas avena', {group:'carb', limit:5, base:false}));
     if (C.cubrir.f > 10) add(searchFoods('aceite nueces almendra aguacate', {group:'grasa', limit:3, base:false}));
     merc = merc.slice(0, 26);
   }
@@ -2226,24 +2283,29 @@ function historial(){
 function diasNoCuenta(lunes){
   let n = 0; for (let i = 0; i < 7; i++){ const d = S.days[addDays(lunes, i)]; if (d && d.nocuenta) n++; } return n;
 }
-// Los 7 días anteriores a `hasta` (por defecto, hoy)
+// Los 7 días anteriores a `hasta` (por defecto, hoy): días en objetivo (kcal a ±8 % y proteína al 90 %, como en el
+// historial), días con proteína y comidas apuntadas. Antes contaba «comidas del plan», y cada comida apuntada con la
+// IA o como «otra cosa» salía como fallo aunque cuadrara.
 function adherenceStats(hasta = dayKey()){
-  let meals = 0, ok = 0, protDays = 0, days = 0;
+  let meals = 0, apuntadas = 0, protDays = 0, okDays = 0, days = 0;
   for (let i = 1; i <= 7; i++){
     const k = addDays(hasta, -i); if (!S.days[k] || S.days[k].nocuenta || k >= dayKey()) continue;
     const D = computeDay(k); days++;
-    D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (['done','changed','moved'].includes(D.meals[m].status)) ok++; });
-    if (D.consumed.p >= D.OBJ.p * 0.9) protDays++;
+    D.sch.order.forEach(m => { if (D.meals[m].merged) return; meals++; if (D.meals[m].status !== 'pending') apuntadas++; });
+    const pOk = D.consumed.p >= D.OBJ.p * 0.9;
+    if (pOk) protDays++;
+    if (pOk && Math.abs(D.consumed.k + D.copas.k - D.TK) <= D.TK * 0.08) okDays++;
   }
   let nc = 0; for (let i = 1; i <= 7; i++){ const d = S.days[addDays(hasta, -i)]; if (d && d.nocuenta) nc++; }
-  return {days, protDays, nc, pct: meals ? R(ok/meals*100) : 0};
+  return {days, protDays, okDays, nc, pct: meals ? R(apuntadas / meals * 100) : 0};
 }
 function adherence(){
-  const {days, protDays, nc, pct} = adherenceStats();
+  const {days, protDays, okDays, nc, pct} = adherenceStats();
   const ncNota = nc ? `<div class="small" style="margin-top:10px">Además hubo <b>${nc} día${nc === 1 ? '' : 's'} que no cuenta${nc === 1 ? '' : 'n'}</b>. Queda${nc === 1 ? '' : 'n'} fuera de estas cifras, pero no es un hueco: al valorar tu peso se tiene${nc === 1 ? '' : 'n'} en cuenta.</div>` : '';
   if (!days) return ncNota || `<div class="empty">Aún no hay días registrados.</div>`;
-  return `<div class="hero"><div><div class="lbl">Comidas del plan</div><div class="big num">${pct}%</div><div class="small">Objetivo: 80 % o más</div></div>
+  return `<div class="hero"><div><div class="lbl">Días en objetivo</div><div class="big num">${okDays}/${days}</div><div class="small">kcal a ±8 % y proteína al 90 %</div></div>
     <div><div class="lbl">Días con proteína</div><div class="big num">${protDays}/${days}</div><div class="small">≥ 90 % del objetivo</div></div></div>
+    <div class="small" style="margin-top:10px">Comidas apuntadas: <b class="num">${pct} %</b>.</div>
     ${[['Esta semana', weekStart(dayKey())], ['La semana pasada', addDays(weekStart(dayKey()), -7)]].map(([t, l]) => (w => w.n ? `<div class="small" style="margin-top:10px">${t}: media de <b class="num">${R(w.avg)} kcal/día</b> (objetivo ${R(w.obj)}, ${w.avg - w.obj >= 0 ? '+' : '−'}${R(Math.abs(w.avg - w.obj))}) en ${w.n} día${w.n === 1 ? '' : 's'} completo${w.n === 1 ? '' : 's'}.</div>` : '')(weekKcal(l))).join('')}${ncNota}`;
 }
 function chart(keys){
@@ -2268,7 +2330,7 @@ function renderAjustes(){
     <label class="f" style="margin-top:0">Objetivo diario</label>
     <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Calorías</label><input type="number" inputmode="numeric" step="50" min="1200" max="5000" data-s="kcal" value="${s.kcal}"></div>
       <div style="flex:1"><label class="f" style="margin-top:0">Proteína (g)</label><input type="number" inputmode="numeric" step="5" min="60" max="300" data-s="prot" value="${s.prot}"></div></div>
-    <div class="muted" style="font-size:13px;margin-top:8px">Las cantidades de cada comida se recalculan solas: la proteína es la de aquí, la grasa ronda el 27 % de las calorías y los hidratos son el resto. La verdura no cambia y la fruta solo se recorta (como mucho a la mitad) si te pasas mucho. El batido entra dentro de este total.</div>
+    <div class="muted" style="font-size:13px;margin-top:8px">Las cantidades de cada comida se recalculan solas: la proteína es la de aquí, la grasa ronda el 27 % de las calorías y los hidratos son el resto. El desayuno (huevos, pan y banana) y la proteína del batido no cambian nunca, y la verdura tampoco. La fruta solo se recorta (como mucho a la mitad) si te pasas mucho; el aceite, los anacardos y la leche se recortan, pero nunca se quitan del todo. El batido entra dentro de este total.</div>
   </div>
   <div class="card">
     <label class="f" style="margin-top:0">✨ IA (Claude)</label>
@@ -2280,6 +2342,7 @@ function renderAjustes(){
   </div>
   <div class="card">
     <div class="row"><div style="flex:1"><label class="f" style="margin-top:0">Despertar</label><input type="time" data-s="wake" value="${s.wake}"></div><div style="flex:1"><label class="f" style="margin-top:0">A dormir</label><input type="time" data-s="bed" value="${s.bed}"></div></div>
+    ${(h => h ? `<div class="muted" style="font-size:13px;margin-top:6px">Por lo que apuntas, te levantas sobre las ${fmt(h.wake)} y te acuestas sobre las ${fmt(h.bed)}.${horarioPropuesto(true) ? ' <button class="stp-reset" data-act="horario-usar">Usar este horario</button>' : ' ✓'}</div>` : '')(horarioReal())}
     <div class="row"><div style="flex:1"><label class="f">Entreno habitual</label><input type="time" data-s="trainTime" value="${s.trainTime}"></div><div style="flex:1"><label class="f">Duración (min)</label><input type="number" data-s="trainDur" value="${s.trainDur}"></div></div>
     <label class="f">Días de entreno habituales</label>
     <div class="days">${[1,2,3,4,5,6,0].map(d=>`<button data-act="tday" data-d="${d}" class="${s.trainDays.includes(d)?'on':''}">${DAYS_SHORT[d]}</button>`).join('')}</div>
@@ -2470,7 +2533,7 @@ function cookList(items){
 // apuntado hasta entonces, y se actualiza cada vez que abres la app.
 function weeklySummaryText(domingo){
   const st = adherenceStats(domingo), w = weeklyAvgs().filter(x => x.n >= 3), parts = [];
-  if (st.days) parts.push(`Comidas del plan: ${st.pct} %. Días con tu proteína: ${st.protDays}/${st.days}.`);
+  if (st.days) parts.push(`Días en objetivo: ${st.okDays}/${st.days}. Días con tu proteína: ${st.protDays}/${st.days}.`);
   if (w.length){ const last = w[w.length-1], prev = w[w.length-2]; parts.push(`Peso medio: ${last.avg.toFixed(1).replace('.',',')} kg` + (prev ? ` (${last.avg-prev.avg>=0?'+':''}${(last.avg-prev.avg).toFixed(2).replace('.',',')} kg)` : '') + '.'); }
   else parts.push('Esta semana apenas hay pesadas: pésate por las mañanas.');
   parts.push('Toca para ver los detalles.');
@@ -2499,7 +2562,7 @@ function buildNotifications(){
       const M = D.meals[m];
       if (M.status !== 'pending' || M.merged || (m === 'desayuno' && breakfastMerged)) continue;
       if (m === 'merienda') out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t), title:'🥤 Hora del batido', body:M.items.map(it => `${amount(it.id, it.g)} de ${dispName(it.id).toLowerCase()}`).join(', ') + '.', tag:'comida', url:'#hoy'});
-      else out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t - 30), title:`🍳 ${MEAL_NAME[m]} a las ${fmt(M.t)}`,
+      else out.push({nid:`${k}:comida:${m}:${M.t}`, at:epochAt(k, M.t - 30), title:`🍳 ${nombreComida(M)} a las ${fmt(M.t)}`,
         body:`Iría bien ir empezando a cocinar: ${cookList(M.items)}.${M.notes.length ? ' Lleva ajustes por lo de hoy.' : ''}`, tag:'comida', url:'#hoy'});
     }
     if (av.resumen && wd === 0) out.push({nid:`${k}:resumen`, at:epochAt(k, 11*60), title:'📊 Tu semana', body:weeklySummaryText(k), tag:'resumen', url:'#progreso'});
@@ -2542,6 +2605,11 @@ app.addEventListener('click', async e => {
     for (const x of afect){ const o = day.meals[x.from]; if (o && o.status === 'moved') delete day.meals[x.from]; }
     save(); render(); toast('Movimiento deshecho'); }
   else if (a === 'planreset'){ const day = getDay(viewDay()); if (day.planEdit) delete day.planEdit[m]; save(); render(); toast(MEAL_NAME[m] + ': vuelve al plan'); }
+  else if (a === 'horario-usar'){ const h = horarioReal(); if (!h) return;
+    const prev = {wake:S.settings.wake, bed:S.settings.bed, dinnerLimit:S.settings.dinnerLimit};
+    Object.assign(S.settings, {wake:fmt(h.wake), bed:fmt(h.bed), dinnerLimit:fmt(h.cena)}); delete S.horarioNo; save(); render();
+    toast(`Te levantas a las ${S.settings.wake}, cenas como tarde a las ${S.settings.dinnerLimit} y te acuestas a las ${S.settings.bed}`, () => { Object.assign(S.settings, prev); save(); render(); }, 'Deshacer', 8000); }
+  else if (a === 'horario-no'){ const h = horarioReal(); if (h) S.horarioNo = {wake:h.wake, bed:h.bed, hasta:addDays(dayKey(), 7)}; save(); render(); }
   else if (a === 'wake') sheetWake();
   else if (a === 'train') sheetTrain();
   else if (a === 'fiesta') sheetFiesta();
