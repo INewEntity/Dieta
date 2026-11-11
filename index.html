@@ -173,7 +173,7 @@ button:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 <div id="sheet-root"></div>
 <script>
 'use strict';
-const VERSION = 54;
+const VERSION = 55;
 const STORE = 'dieta.v1';
 
 /* ===================== Alimentos (por 100 g o 100 ml) ===================== */
@@ -2231,34 +2231,75 @@ function sheetLink(base){
 
 /* ===================== Progreso ===================== */
 function weekStart(k){ const d = keyToDate(k); const wd = (d.getDay()+6)%7; return addDays(k, -wd); }
+// La pesada de la mañana lleva dentro lo que se comió el día anterior: si ese día no cuenta, esa pesada tampoco.
+const pesoCuenta = k => !(S.days[addDays(k, -1)] || {}).nocuenta;
+const diasEntre = (a, b) => Math.round((keyToDate(b) - keyToDate(a)) / 864e5);
+const kgSem = x => (x >= 0 ? '+' : '') + x.toFixed(2).replace('.', ',');
 function weeklyAvgs(){
   const by = {};
-  Object.entries(S.weights).forEach(([k,v]) => { const w = weekStart(k); (by[w] = by[w] || []).push(v); });
+  Object.entries(S.weights).forEach(([k,v]) => { if (!pesoCuenta(k)) return; const w = weekStart(k); (by[w] = by[w] || []).push(v); });
   return Object.keys(by).sort().map(w => ({w, avg: by[w].reduce((a,b)=>a+b,0)/by[w].length, n: by[w].length}));
+}
+const mediana = a => { const s = [...a].sort((x,y) => x-y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2; };
+// Ritmo de peso (kg/semana) con las pesadas que cuentan entre `desde` y `hasta`. Comparar la media de una semana con
+// la anterior tiene un error de unos ±0,2 kg (el peso de un día baila ±0,4 por la cena, la sal y el baño), tanto como
+// el objetivo; por eso se usa la tendencia de varias semanas. Pendiente de Theil-Sen (mediana de las pendientes entre
+// pares de pesadas separadas 3 días o más): un pico de una noche no la mueve. Su error sale de lo que se separan las
+// pesadas de la recta, agrandado si días seguidos se parecen (autocorrelación r1): SE·√((1+r1)/(1−r1)). r1 se limita
+// a 0,8 solo para que la cuenta no se dispare con pocos datos.
+function tendencia(desde, hasta){
+  const ks = Object.keys(S.weights).filter(k => k >= desde && k <= hasta && pesoCuenta(k)).sort();
+  const pts = ks.map(k => [diasEntre(desde, k), +S.weights[k]]), n = pts.length;
+  const T = {n, dias: n ? diasEntre(ks[0], ks[n-1]) + 1 : 0, b: null, se: null};
+  if (n < 3) return T;
+  const sl = [];
+  for (let i = 0; i < n; i++) for (let j = i+1; j < n; j++) if (pts[j][0] - pts[i][0] >= 3) sl.push((pts[j][1] - pts[i][1]) / (pts[j][0] - pts[i][0]));
+  if (!sl.length) return T;
+  const b = mediana(sl), a = mediana(pts.map(([t,y]) => y - b*t)), r = pts.map(([t,y]) => y - a - b*t);
+  const tm = pts.reduce((s,[t]) => s + t, 0) / n, sxx = pts.reduce((s,[t]) => s + (t-tm)**2, 0), rr = r.reduce((s,x) => s + x*x, 0);
+  let r1 = 0; if (rr > 0){ for (let i = 1; i < n; i++) r1 += r[i]*r[i-1]; r1 = Math.min(0.8, Math.max(0, r1 / rr)); }
+  T.b = 7*b; T.se = 7 * Math.sqrt(rr / (n-2) / sxx) * Math.sqrt((1+r1) / (1-r1));
+  return T;
+}
+// Ventana para decidir: los últimos 28 días, pero nunca antes del último cambio de calorías (lo de antes mide el ritmo
+// con el objetivo viejo).
+function ventanaPeso(hasta){
+  const h = S.kcalHist || [];
+  let cambio = null; for (let i = h.length - 1; i > 0; i--) if (h[i][1] !== h[i-1][1]){ cambio = h[i][0]; break; }
+  let desde = addDays(hasta, -27); if (cambio && cambio > desde) desde = cambio;
+  return {desde, cambio};
+}
+// Cambio de cintura en ~4 semanas: la última medida frente a la más cercana a 28 días antes (al menos 21 días antes).
+function cinturaCambio(hasta){
+  const ks = Object.keys(S.waist || {}).filter(k => k <= hasta).sort(), u = ks[ks.length-1];
+  if (!u) return null;
+  const prev = ks.filter(k => diasEntre(k, u) >= 21).sort((x,y) => Math.abs(diasEntre(x,u) - 28) - Math.abs(diasEntre(y,u) - 28))[0];
+  return prev ? S.waist[u] - S.waist[prev] : null;
 }
 function renderProgreso(){
   const k = dayKey(), today = S.weights[k];
   const keys = Object.keys(S.weights).sort();
   const weeks = weeklyAvgs();
-  let h = `<header class="top"><div><h1>Progreso</h1><div class="sub">Pésate al levantarte, después del baño.</div></div></header>
+  let h = `<header class="top"><div><h1>Progreso</h1><div class="sub">Pésate cada mañana igual: al levantarte, en ayunas.</div></div></header>
   <div class="card"><label class="f" style="margin-top:0">Peso de hoy (kg)</label><div class="row"><input type="number" inputmode="decimal" step="0.1" id="wt" value="${today ?? ''}" placeholder="75,0"><button class="btn pri sm" data-act="saveweight">Guardar</button></div></div>`;
   if (keys.length >= 2) h += `<div class="card">${chart(keys.slice(-42))}<div class="muted" style="font-size:12px">Puntos: peso diario · línea: media de 7 días</div></div>`;
-  // regla del volumen
-  const full = weeks.filter(w => w.w < weekStart(k) && w.n >= 3);
-  let advice = 'Necesito al menos 3 semanas con 3 o más pesadas para recomendarte algo. Sigue así.';
-  if (full.length >= 3){
-    const [a,b,c] = full.slice(-3).map(w=>w.avg), d1 = b-a, d2 = c-b;
-    // los días que no cuentan no entran en las medias, pero sí en la decisión: comida y agua extra que mueven la báscula
-    const ncUlt = diasNoCuenta(full[full.length-1].w), ncAnt = diasNoCuenta(full[full.length-2].w), ncTxt = n => `${n} día${n === 1 ? '' : 's'} que no cuenta${n === 1 ? '' : 'n'}`;
-    if (d2 > 0.35 && ncUlt) advice = `<b>Subes ${d2.toFixed(2).replace('.',',')} kg</b> la última semana, pero tuvo ${ncTxt(ncUlt)}: parte del salto puede venir de esos días (comida distinta, sal, agua), no de grasa. <b>No bajes todavía</b>; si la semana que viene sigue por encima de +0,35 kg, entonces sí.`;
-    else if (d1 < 0.1 && d2 < 0.1 && (ncUlt || ncAnt)) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas, aunque hubo ${ncTxt(ncUlt + ncAnt)} de por medio. Dos semanas seguidas sin subir indican que falta comida: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
-    else if (d1 < 0.1 && d2 < 0.1) advice = `<b>Subes menos de 0,1 kg/semana</b> dos semanas seguidas: toca subir <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
-    else if (d2 > 0.35) advice = `<b>Subes más de 0,35 kg/semana</b>: demasiado rápido, parte será grasa.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="-150">Bajar a ${(+S.settings.kcal)-150} kcal</button></div>`;
-    else advice = `Ritmo correcto (${d2>=0?'+':''}${d2.toFixed(2).replace('.',',')} kg la última semana). <b>No toques nada.</b>${ncUlt ? ` Hubo ${ncTxt(ncUlt)}: tenlo en cuenta, el peso de esa semana puede ir algo movido por ${ncUlt === 1 ? 'ese día' : 'esos días'}.` : ''}`;
-  } else if (full.length === 2){ const d = full[1].avg - full[0].avg; advice = `Última semana: <b>${d>=0?'+':''}${d.toFixed(2).replace('.',',')} kg</b>. Objetivo: +0,15 a +0,25 kg/semana. Con una semana más te digo si hay que ajustar.`; }
-  h += `<ul class="tips"><li>${advice}</li></ul>`;
+  // regla del volumen (+0,15 a +0,25 kg/semana): se decide con la tendencia de hasta 28 días, no con semanas sueltas.
+  // Se toca solo si el rango probable (80 %: ritmo ± 1,28 errores) queda entero fuera del objetivo; 150 kcal/día mueven
+  // unos 0,1–0,15 kg/semana, así que equivocarse unas semanas por poco cuesta menos que cambiar por ruido.
+  const {desde, cambio} = ventanaPeso(k), T = tendencia(desde, k), fCambio = cambio ? (d => `${d.getDate()} ${MONTHS[d.getMonth()]}`)(keyToDate(cambio)) : '';
+  let advice;
+  if (T.b == null || T.n < 12 || T.dias < 21)
+    advice = `Para recomendarte algo necesito <b>21 días con 12 pesadas</b>${cambio ? ` desde que cambiaste las calorías (${fCambio})` : ''}. Llevas ${T.n} pesada${T.n === 1 ? '' : 's'} en ${T.dias} día${T.dias === 1 ? '' : 's'}.${T.b != null ? ` De momento sale ${kgSem(T.b)} kg/semana, pero aún es poco fiable.` : ''} Sigue así.`;
+  else {
+    const lo = T.b - 1.28*T.se, hi = T.b + 1.28*T.se, cin = cinturaCambio(k);
+    const base = `Tendencia de ${T.dias} días (${T.n} pesadas): <b>${kgSem(T.b)} kg/semana</b>, probablemente entre ${kgSem(lo)} y ${kgSem(hi)}. Objetivo: +0,15 a +0,25.${T.dias < 28 ? ' Provisional: con 28 días será más fiable.' : ''}`;
+    if (hi < 0.15) advice = `${base} Subes claramente menos de lo que toca: sube <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="150">Subir a ${(+S.settings.kcal)+150} kcal</button></div>`;
+    else if (lo > 0.25 || (T.b > 0.35 && cin != null && cin >= 1)) advice = `${base} Subes claramente más rápido de lo que toca${lo > 0.25 ? '' : ` y la cintura ha subido ${cin.toFixed(1).replace('.',',')} cm en un mes`}: baja <b>150 kcal</b>.<div class="evactions"><button class="btn pri sm" data-act="kcaladj" data-v="-150">Bajar a ${(+S.settings.kcal)-150} kcal</button></div>`;
+    else advice = `${base} <b>No toques nada.</b>`;
+  }
+  h += `<ul class="tips"><li>${advice}</li></ul><div class="muted" style="font-size:12px;margin:-4px 4px 10px">No mires el peso de un día: baila ±0,4 kg por la cena, la sal y el baño. Tras cambiar las calorías, la cuenta empieza de cero (unas 3 semanas). La pesada de la mañana siguiente a un día que no cuenta no entra.</div>`;
   if (weeks.length) h += `<h3 class="sec">Medias semanales</h3><div class="card" style="padding:6px 12px"><table class="t num"><tr><th>Semana</th><th>Media</th><th>Cambio</th><th>Días</th></tr>${weeks.slice(-8).reverse().map((w,i,arr)=>{ const prev = arr[i+1]; const d = prev ? w.avg - prev.avg : null; const dd = keyToDate(w.w);
-    return `<tr><td>${dd.getDate()} ${MONTHS[dd.getMonth()]}</td><td>${w.avg.toFixed(1).replace('.',',')}</td><td>${d==null?'—':(d>=0?'+':'')+d.toFixed(2).replace('.',',')}</td><td>${w.n}</td></tr>`; }).join('')}</table></div>`;
+    return `<tr><td>${dd.getDate()} ${MONTHS[dd.getMonth()]}</td><td>${w.avg.toFixed(1).replace('.',',')}</td><td>${d==null?'—':(d>=0?'+':'')+d.toFixed(2).replace('.',',')}</td><td>${w.n}</td></tr>`; }).join('')}</table><div class="muted" style="font-size:12px;margin:4px 0">Solo orientativo: de una semana a otra el cambio baila ±0,2 kg sin que pase nada. Para decidir vale la tendencia de arriba.</div></div>`;
   // cintura
   const wk = Object.keys(S.waist).sort();
   h += `<h3 class="sec">Cintura (cada 2 semanas)</h3><div class="card"><div class="row"><input type="number" inputmode="decimal" step="0.5" id="wa" placeholder="cm a la altura del ombligo"><button class="btn sm" data-act="savewaist">Guardar</button></div>
@@ -2284,10 +2325,6 @@ function historial(){
       <div class="num" style="text-align:right;font-size:14px"><span style="${ok(kOk)}">${R(D.consumed.k + D.copas.k)}</span>${D.copas.n ? ' 🍸' : ''} <span class="muted">kcal</span><br><span style="${ok(pOk)}">${R(D.consumed.p)}</span> <span class="muted">g P</span></div>
       <span class="muted" style="font-size:18px">›</span></button>`;
   }).join('');
-}
-// Días marcados como «no cuenta» (con algo pasado) en la semana que empieza en `lunes`
-function diasNoCuenta(lunes){
-  let n = 0; for (let i = 0; i < 7; i++){ const d = S.days[addDays(lunes, i)]; if (d && d.nocuenta) n++; } return n;
 }
 // Los 7 días anteriores a `hasta` (por defecto, hoy): días en objetivo (kcal a ±8 % y proteína al 90 %, como en el
 // historial), días con proteína y comidas apuntadas. Antes contaba «comidas del plan», y cada comida apuntada con la
@@ -2540,7 +2577,7 @@ function cookList(items){
 function weeklySummaryText(domingo){
   const st = adherenceStats(domingo), w = weeklyAvgs().filter(x => x.n >= 3), parts = [];
   if (st.days) parts.push(`Días en objetivo: ${st.okDays}/${st.days}. Días con tu proteína: ${st.protDays}/${st.days}.`);
-  if (w.length){ const last = w[w.length-1], prev = w[w.length-2]; parts.push(`Peso medio: ${last.avg.toFixed(1).replace('.',',')} kg` + (prev ? ` (${last.avg-prev.avg>=0?'+':''}${(last.avg-prev.avg).toFixed(2).replace('.',',')} kg)` : '') + '.'); }
+  if (w.length){ const last = w[w.length-1], T = tendencia(ventanaPeso(domingo).desde, domingo); parts.push(`Peso medio: ${last.avg.toFixed(1).replace('.',',')} kg.` + (T.b != null && T.n >= 12 && T.dias >= 21 ? ` Tendencia: ${kgSem(T.b)} kg/semana.` : '')); }
   else parts.push('Esta semana apenas hay pesadas: pésate por las mañanas.');
   parts.push('Toca para ver los detalles.');
   return parts.join(' ');
